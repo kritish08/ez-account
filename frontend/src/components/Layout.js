@@ -13,12 +13,17 @@ import {
   LogOut,
   Menu,
   X,
-  ChevronRight,
+  Package,
+  Truck,
+  ShoppingCart,
 } from "lucide-react";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/customers", icon: Users, label: "Customers" },
+  { to: "/products", icon: Package, label: "Products" },
+  { to: "/suppliers", icon: Truck, label: "Suppliers" },
+  { to: "/purchases", icon: ShoppingCart, label: "Purchases" },
   { to: "/invoices", icon: FileText, label: "Invoices" },
   { to: "/payments", icon: CreditCard, label: "Payments" },
   { to: "/expenses", icon: Receipt, label: "Expenses" },
@@ -88,6 +93,21 @@ const Layout = () => {
           {/* Settings & User */}
           <div className="border-t border-slate-200 p-4">
             <NavLink
+              to="/settings"
+              onClick={() => setSidebarOpen(false)}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all mb-1 ${
+                  isActive
+                    ? "bg-brand-50 text-brand-700"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                }`
+              }
+            >
+              <Settings size={20} />
+              Settings
+            </NavLink>
+            
+            <NavLink
               to="/setup"
               onClick={() => setSidebarOpen(false)}
               className={({ isActive }) =>
@@ -98,7 +118,7 @@ const Layout = () => {
                 }`
               }
             >
-              <Settings size={20} />
+              <LayoutDashboard size={20} />
               Business Setup
             </NavLink>
             
