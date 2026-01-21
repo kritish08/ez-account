@@ -505,25 +505,120 @@ async def download_invoice_pdf(invoice_id: str, current_user: dict = Depends(get
     customer = await db.customers.find_one({"id": invoice["customer_id"]}, {"_id": 0})
     business = await db.business.find_one({}, {"_id": 0})
     
-    try:
-        template = jinja_env.get_template("invoice.html")
-    except:
-        # Create default template if not exists
-        template_content = get_invoice_template()
-        (template_dir / "invoice.html").write_text(template_content)
-        template = jinja_env.get_template("invoice.html")
+    # Generate PDF using reportlab
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    elements = []
+    styles = getSampleStyleSheet()
     
-    html_content = template.render(
-        invoice=invoice,
-        customer=customer or {},
-        business=business or {},
-        generated_at=datetime.now(timezone.utc).strftime("%d %b %Y, %I:%M %p")
-    )
+    # Custom styles
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, textColor=colors.HexColor('#4338ca'), spaceAfter=20)
+    heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#64748b'), spaceAfter=10)
+    normal_style = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=10, textColor=colors.HexColor('#0f172a'))
     
-    pdf_bytes = HTML(string=html_content).write_pdf()
+    # Business Name
+    business_name = business.get('name', 'Your Business') if business else 'Your Business'
+    elements.append(Paragraph(business_name, title_style))
+    
+    if business:
+        if business.get('address'):
+            elements.append(Paragraph(business['address'], normal_style))
+        contact_parts = []
+        if business.get('phone'):
+            contact_parts.append(f"Phone: {business['phone']}")
+        if business.get('email'):
+            contact_parts.append(f"Email: {business['email']}")
+        if contact_parts:
+            elements.append(Paragraph(" | ".join(contact_parts), normal_style))
+        if business.get('gstin'):
+            elements.append(Paragraph(f"GSTIN: {business['gstin']}", normal_style))
+    
+    elements.append(Spacer(1, 20))
+    
+    # Invoice Header
+    elements.append(Paragraph(f"INVOICE: {invoice['invoice_number']}", ParagraphStyle('InvNum', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#0f172a'))))
+    elements.append(Paragraph(f"Date: {invoice['date']}", normal_style))
+    elements.append(Paragraph(f"Status: {invoice['status'].replace('_', ' ').title()}", normal_style))
+    
+    elements.append(Spacer(1, 20))
+    
+    # Bill To
+    elements.append(Paragraph("BILL TO", heading_style))
+    customer_name = customer.get('name', invoice['customer_name']) if customer else invoice['customer_name']
+    elements.append(Paragraph(f"<b>{customer_name}</b>", normal_style))
+    if customer:
+        if customer.get('address'):
+            elements.append(Paragraph(customer['address'], normal_style))
+        if customer.get('phone'):
+            elements.append(Paragraph(f"Phone: {customer['phone']}", normal_style))
+        if customer.get('gstin'):
+            elements.append(Paragraph(f"GSTIN: {customer['gstin']}", normal_style))
+    
+    elements.append(Spacer(1, 20))
+    
+    # Items Table
+    table_data = [['Description', 'Qty', 'Rate', 'Amount']]
+    for item in invoice['items']:
+        table_data.append([
+            item['description'],
+            str(item['quantity']),
+            f"₹ {item['rate']:,.2f}",
+            f"₹ {item['amount']:,.2f}"
+        ])
+    
+    table = Table(table_data, colWidths=[250, 60, 100, 100])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f1f5f9')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#64748b')),
+        ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('TOPPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+        ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor('#0f172a')),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 10),
+        ('TOPPADDING', (0, 1), (-1, -1), 10),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+    ]))
+    elements.append(table)
+    
+    elements.append(Spacer(1, 20))
+    
+    # Totals
+    totals_data = [['Subtotal', f"₹ {invoice['total']:,.2f}"]]
+    if invoice.get('credit_applied', 0) > 0:
+        totals_data.append(['Credit Applied', f"- ₹ {invoice['credit_applied']:,.2f}"])
+    if invoice.get('paid_amount', 0) > 0:
+        totals_data.append(['Paid', f"₹ {invoice['paid_amount']:,.2f}"])
+    balance_due = invoice['total'] - invoice.get('paid_amount', 0)
+    totals_data.append(['Balance Due', f"₹ {balance_due:,.2f}"])
+    
+    totals_table = Table(totals_data, colWidths=[400, 110])
+    totals_table.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('TEXTCOLOR', (1, -1), (1, -1), colors.HexColor('#4338ca')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, colors.HexColor('#4338ca')),
+    ]))
+    elements.append(totals_table)
+    
+    # Notes
+    if invoice.get('notes'):
+        elements.append(Spacer(1, 20))
+        elements.append(Paragraph("Notes", heading_style))
+        elements.append(Paragraph(invoice['notes'], normal_style))
+    
+    doc.build(elements)
+    buffer.seek(0)
     
     return StreamingResponse(
-        io.BytesIO(pdf_bytes),
+        buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=Invoice-{invoice['invoice_number']}.pdf"}
     )
