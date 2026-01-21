@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { getCustomers, createInvoice, formatCurrency } from "../lib/api";
+import { getCustomers, getProducts, createInvoice, formatCurrency } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Checkbox } from "../components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -13,8 +14,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, Loader2 } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Loader2, Package, AlertTriangle, Info } from "lucide-react";
 
 const CreateInvoice = () => {
   const navigate = useNavigate();
@@ -22,25 +24,31 @@ const CreateInvoice = () => {
   const preselectedCustomer = searchParams.get("customer");
 
   const [customers, setCustomers] = useState([]);
+  const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [formData, setFormData] = useState({
     customer_id: preselectedCustomer || "",
     date: new Date().toISOString().split("T")[0],
     notes: "",
-    items: [{ description: "", quantity: 1, rate: 0 }],
+    is_draft: false,
+    items: [{ product_id: "", description: "", quantity: 1, rate: 0 }],
   });
 
   useEffect(() => {
-    fetchCustomers();
+    fetchData();
   }, []);
 
-  const fetchCustomers = async () => {
+  const fetchData = async () => {
     try {
-      const response = await getCustomers();
-      setCustomers(response.data);
+      const [customersRes, productsRes] = await Promise.all([
+        getCustomers(),
+        getProducts(),
+      ]);
+      setCustomers(customersRes.data);
+      setProducts(productsRes.data);
     } catch (error) {
-      toast.error("Failed to load customers");
+      toast.error("Failed to load data");
     } finally {
       setLoading(false);
     }
@@ -49,7 +57,7 @@ const CreateInvoice = () => {
   const handleAddItem = () => {
     setFormData((prev) => ({
       ...prev,
-      items: [...prev.items, { description: "", quantity: 1, rate: 0 }],
+      items: [...prev.items, { product_id: "", description: "", quantity: 1, rate: 0 }],
     }));
   };
 
@@ -64,11 +72,29 @@ const CreateInvoice = () => {
   const handleItemChange = (index, field, value) => {
     setFormData((prev) => ({
       ...prev,
-      items: prev.items.map((item, i) =>
-        i === index
-          ? { ...item, [field]: field === "quantity" || field === "rate" ? parseFloat(value) || 0 : value }
-          : item
-      ),
+      items: prev.items.map((item, i) => {
+        if (i !== index) return item;
+        const updatedItem = { ...item, [field]: field === "quantity" || field === "rate" ? parseFloat(value) || 0 : value };
+        
+        // Auto-fill when product is selected
+        if (field === "product_id" && value) {
+          const product = products.find((p) => p.id === value);
+          if (product) {
+            updatedItem.description = product.name;
+            updatedItem.rate = product.selling_price;
+          }
+        }
+        
+        // Clear product_id if description is manually changed
+        if (field === "description" && item.product_id) {
+          const product = products.find((p) => p.id === item.product_id);
+          if (product && value !== product.name) {
+            updatedItem.product_id = "";
+          }
+        }
+        
+        return updatedItem;
+      }),
     }));
   };
 
@@ -96,11 +122,29 @@ const CreateInvoice = () => {
         customer_id: formData.customer_id,
         date: formData.date,
         notes: formData.notes || null,
-        items: validItems,
+        is_draft: formData.is_draft,
+        items: validItems.map((item) => ({
+          product_id: item.product_id || null,
+          description: item.description,
+          quantity: item.quantity,
+          rate: item.rate,
+        })),
       };
       
       const response = await createInvoice(payload);
-      toast.success(`Invoice ${response.data.invoice_number} created!`);
+      
+      let message = `Invoice ${response.data.invoice_number} created!`;
+      if (response.data.credit_applied > 0) {
+        message += ` ${formatCurrency(response.data.credit_applied)} customer credit applied automatically.`;
+      }
+      toast.success(message);
+      
+      if (response.data.stock_warnings?.length > 0) {
+        toast.warning(response.data.warning_message, {
+          description: response.data.stock_warnings.map((w) => `${w.product}: ${w.current_stock} in stock`).join(", "),
+        });
+      }
+      
       navigate(`/invoices/${response.data.id}`);
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to create invoice");
@@ -133,9 +177,7 @@ const CreateInvoice = () => {
                 <Label>Customer *</Label>
                 <Select
                   value={formData.customer_id}
-                  onValueChange={(value) =>
-                    setFormData((prev) => ({ ...prev, customer_id: value }))
-                  }
+                  onValueChange={(value) => setFormData((prev) => ({ ...prev, customer_id: value }))}
                   disabled={loading}
                 >
                   <SelectTrigger data-testid="invoice-customer-select">
@@ -150,8 +192,9 @@ const CreateInvoice = () => {
                   </SelectContent>
                 </Select>
                 {selectedCustomer?.credit > 0 && (
-                  <p className="text-xs text-emerald-600">
-                    Customer has {formatCurrency(selectedCustomer.credit)} credit available
+                  <p className="text-xs text-emerald-600 flex items-center gap-1">
+                    <Info className="h-3 w-3" />
+                    {formatCurrency(selectedCustomer.credit)} credit will be auto-applied
                   </p>
                 )}
               </div>
@@ -162,9 +205,7 @@ const CreateInvoice = () => {
                   id="date"
                   type="date"
                   value={formData.date}
-                  onChange={(e) =>
-                    setFormData((prev) => ({ ...prev, date: e.target.value }))
-                  }
+                  onChange={(e) => setFormData((prev) => ({ ...prev, date: e.target.value }))}
                   data-testid="invoice-date-input"
                 />
               </div>
@@ -179,22 +220,41 @@ const CreateInvoice = () => {
           </CardHeader>
           <CardContent className="space-y-4">
             {formData.items.map((item, index) => (
-              <div
-                key={index}
-                className="grid grid-cols-12 gap-3 items-end p-4 bg-slate-50 rounded-lg"
-              >
+              <div key={index} className="grid grid-cols-12 gap-3 items-end p-4 bg-slate-50 rounded-lg">
                 <div className="col-span-12 md:col-span-5 space-y-2">
-                  <Label>Description</Label>
-                  <Input
-                    value={item.description}
-                    onChange={(e) => handleItemChange(index, "description", e.target.value)}
-                    placeholder="Item description"
-                    data-testid={`item-description-${index}`}
-                  />
+                  <Label className="text-xs text-slate-500">Product or Description</Label>
+                  <div className="space-y-2">
+                    <Select
+                      value={item.product_id}
+                      onValueChange={(value) => handleItemChange(index, "product_id", value)}
+                    >
+                      <SelectTrigger data-testid={`item-product-${index}`}>
+                        <SelectValue placeholder="Select product (optional)" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">Free text item</SelectItem>
+                        {products.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <div className="flex items-center gap-2">
+                              <Package className="h-3 w-3 text-slate-400" />
+                              {p.name}
+                              <span className="text-xs text-slate-400">({p.current_stock} in stock)</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      value={item.description}
+                      onChange={(e) => handleItemChange(index, "description", e.target.value)}
+                      placeholder="Item description"
+                      data-testid={`item-description-${index}`}
+                    />
+                  </div>
                 </div>
                 
                 <div className="col-span-4 md:col-span-2 space-y-2">
-                  <Label>Qty</Label>
+                  <Label className="text-xs text-slate-500">Qty</Label>
                   <Input
                     type="number"
                     min="0"
@@ -207,7 +267,7 @@ const CreateInvoice = () => {
                 </div>
                 
                 <div className="col-span-4 md:col-span-2 space-y-2">
-                  <Label>Rate</Label>
+                  <Label className="text-xs text-slate-500">Rate</Label>
                   <div className="relative">
                     <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-sm">₹</span>
                     <Input
@@ -223,7 +283,7 @@ const CreateInvoice = () => {
                 </div>
                 
                 <div className="col-span-3 md:col-span-2 space-y-2">
-                  <Label>Amount</Label>
+                  <Label className="text-xs text-slate-500">Amount</Label>
                   <div className="h-10 flex items-center font-mono font-medium text-slate-900">
                     {formatCurrency(item.quantity * item.rate)}
                   </div>
@@ -244,13 +304,7 @@ const CreateInvoice = () => {
               </div>
             ))}
 
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handleAddItem}
-              className="w-full"
-              data-testid="add-item-btn"
-            >
+            <Button type="button" variant="outline" onClick={handleAddItem} className="w-full" data-testid="add-item-btn">
               <Plus className="h-4 w-4 mr-2" />
               Add Item
             </Button>
@@ -266,13 +320,23 @@ const CreateInvoice = () => {
                 <Textarea
                   id="notes"
                   value={formData.notes}
-                  onChange={(e) =>
-                    setFormData((prev) => ({ ...prev, notes: e.target.value }))
-                  }
+                  onChange={(e) => setFormData((prev) => ({ ...prev, notes: e.target.value }))}
                   placeholder="Any additional notes..."
                   rows={3}
                   data-testid="invoice-notes-input"
                 />
+                
+                <div className="flex items-center space-x-2 pt-2">
+                  <Checkbox
+                    id="is_draft"
+                    checked={formData.is_draft}
+                    onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, is_draft: checked }))}
+                    data-testid="invoice-draft-checkbox"
+                  />
+                  <Label htmlFor="is_draft" className="text-sm text-slate-600 cursor-pointer">
+                    Save as draft (won't affect stock or balances)
+                  </Label>
+                </div>
               </div>
 
               <div className="flex flex-col justify-end">
@@ -281,7 +345,7 @@ const CreateInvoice = () => {
                     <span className="text-sm text-slate-500">Subtotal</span>
                     <span className="font-mono">{formatCurrency(calculateTotal())}</span>
                   </div>
-                  {selectedCustomer?.credit > 0 && (
+                  {selectedCustomer?.credit > 0 && !formData.is_draft && (
                     <div className="flex justify-between items-center mb-2 text-emerald-600">
                       <span className="text-sm">Credit to apply</span>
                       <span className="font-mono">
@@ -306,17 +370,11 @@ const CreateInvoice = () => {
           <Button type="button" variant="outline" onClick={() => navigate("/invoices")}>
             Cancel
           </Button>
-          <Button
-            type="submit"
-            className="bg-brand-600 hover:bg-brand-700"
-            disabled={saving}
-            data-testid="save-invoice-btn"
-          >
+          <Button type="submit" className="bg-brand-600 hover:bg-brand-700" disabled={saving} data-testid="save-invoice-btn">
             {saving ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Creating...
-              </>
+              <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>
+            ) : formData.is_draft ? (
+              "Save Draft"
             ) : (
               "Create Invoice"
             )}
