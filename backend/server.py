@@ -15,8 +15,11 @@ from decimal import Decimal
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import io
-from jinja2 import Environment, FileSystemLoader
-from weasyprint import HTML
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch, mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -34,11 +37,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
-
-# Jinja2 for PDF templates
-template_dir = ROOT_DIR / "templates"
-template_dir.mkdir(exist_ok=True)
-jinja_env = Environment(loader=FileSystemLoader(str(template_dir)))
 
 app = FastAPI(title="EZ Accounts API", version="1.0.0")
 api_router = APIRouter(prefix="/api")
