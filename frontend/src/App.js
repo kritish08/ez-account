@@ -11,10 +11,15 @@ import Customers from "./pages/Customers";
 import CustomerDetail from "./pages/CustomerDetail";
 import Invoices from "./pages/Invoices";
 import CreateInvoice from "./pages/CreateInvoice";
+import EditInvoice from "./pages/EditInvoice";
 import InvoiceDetail from "./pages/InvoiceDetail";
 import Payments from "./pages/Payments";
 import Expenses from "./pages/Expenses";
 import Reports from "./pages/Reports";
+import Products from "./pages/Products";
+import Suppliers from "./pages/Suppliers";
+import Purchases from "./pages/Purchases";
+import Settings from "./pages/Settings";
 import Layout from "./components/Layout";
 
 // Auth context
@@ -53,12 +58,17 @@ function AppRoutes() {
         <Route path="setup" element={<Setup />} />
         <Route path="customers" element={<Customers />} />
         <Route path="customers/:id" element={<CustomerDetail />} />
+        <Route path="products" element={<Products />} />
+        <Route path="suppliers" element={<Suppliers />} />
+        <Route path="purchases" element={<Purchases />} />
         <Route path="invoices" element={<Invoices />} />
         <Route path="invoices/new" element={<CreateInvoice />} />
         <Route path="invoices/:id" element={<InvoiceDetail />} />
+        <Route path="invoices/:id/edit" element={<EditInvoice />} />
         <Route path="payments" element={<Payments />} />
         <Route path="expenses" element={<Expenses />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
   );
