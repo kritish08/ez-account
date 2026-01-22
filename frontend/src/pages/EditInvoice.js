@@ -42,14 +42,14 @@ const EditInvoice = () => {
         getInvoice(id),
         getProducts(),
       ]);
-      
+
       setInvoice(invoiceRes.data);
       setProducts(productsRes.data);
       setFormData({
         date: invoiceRes.data.date,
         notes: invoiceRes.data.notes || "",
         items: invoiceRes.data.items.map((item) => ({
-          product_id: item.product_id || "",
+          product_id: item.product_id || "manual_entry",
           description: item.description,
           quantity: item.quantity,
           rate: item.rate,
@@ -84,7 +84,7 @@ const EditInvoice = () => {
       items: prev.items.map((item, i) => {
         if (i !== index) return item;
         const updatedItem = { ...item, [field]: field === "quantity" || field === "rate" ? parseFloat(value) || 0 : value };
-        
+
         if (field === "product_id" && value) {
           const product = products.find((p) => p.id === value);
           if (product) {
@@ -92,14 +92,14 @@ const EditInvoice = () => {
             updatedItem.rate = product.selling_price;
           }
         }
-        
+
         if (field === "description" && item.product_id) {
           const product = products.find((p) => p.id === item.product_id);
           if (product && value !== product.name) {
             updatedItem.product_id = "";
           }
         }
-        
+
         return updatedItem;
       }),
     }));
@@ -111,7 +111,7 @@ const EditInvoice = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     const validItems = formData.items.filter((item) => item.description && item.rate > 0);
     if (validItems.length === 0) {
       toast.error("Please add at least one item");
@@ -124,27 +124,27 @@ const EditInvoice = () => {
         date: formData.date,
         notes: formData.notes || null,
         items: validItems.map((item) => ({
-          product_id: item.product_id || null,
+          product_id: (item.product_id && item.product_id !== "manual_entry") ? item.product_id : null,
           description: item.description,
           quantity: item.quantity,
           rate: item.rate,
         })),
       };
-      
+
       const response = await updateInvoice(id, payload);
-      
+
       let message = "Invoice updated successfully!";
       if (response.data.credit_applied > 0) {
         message += ` ${formatCurrency(response.data.credit_applied)} customer credit applied.`;
       }
       toast.success(message);
-      
+
       if (response.data.stock_warnings?.length > 0) {
         toast.warning(response.data.warning_message, {
           description: response.data.stock_warnings.map((w) => `${w.product}: ${w.current_stock} in stock`).join(", "),
         });
       }
-      
+
       navigate(`/invoices/${id}`);
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to update invoice");
@@ -226,14 +226,14 @@ const EditInvoice = () => {
                   <Label className="text-xs text-slate-500">Product or Description</Label>
                   <div className="space-y-2">
                     <Select
-                      value={item.product_id}
+                      value={item.product_id || "manual_entry"}
                       onValueChange={(value) => handleItemChange(index, "product_id", value)}
                     >
                       <SelectTrigger data-testid={`edit-item-product-${index}`}>
                         <SelectValue placeholder="Select product (optional)" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="">Free text item</SelectItem>
+                        <SelectItem value="manual_entry">Free text item</SelectItem>
                         {products.map((p) => (
                           <SelectItem key={p.id} value={p.id}>
                             <div className="flex items-center gap-2">
@@ -252,7 +252,7 @@ const EditInvoice = () => {
                     />
                   </div>
                 </div>
-                
+
                 <div className="col-span-4 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Qty</Label>
                   <Input
@@ -265,7 +265,7 @@ const EditInvoice = () => {
                     data-testid={`edit-item-qty-${index}`}
                   />
                 </div>
-                
+
                 <div className="col-span-4 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Rate</Label>
                   <div className="relative">
@@ -281,14 +281,14 @@ const EditInvoice = () => {
                     />
                   </div>
                 </div>
-                
+
                 <div className="col-span-3 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Amount</Label>
                   <div className="h-10 flex items-center font-mono font-medium text-slate-900">
                     {formatCurrency(item.quantity * item.rate)}
                   </div>
                 </div>
-                
+
                 <div className="col-span-1 flex justify-end">
                   <Button
                     type="button"

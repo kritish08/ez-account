@@ -5,6 +5,8 @@ import {
   getSalesReport,
   getExpensesReport,
   getCashBankReport,
+  getInventoryReport,
+  exportReport,
   formatCurrency,
   formatDate,
 } from "../lib/api";
@@ -32,6 +34,8 @@ import {
   Building2,
   Download,
   RefreshCw,
+  Package,
+  FileText,
 } from "lucide-react";
 
 const Reports = () => {
@@ -67,6 +71,9 @@ const Reports = () => {
         case "cash-bank":
           response = await getCashBankReport();
           break;
+        case "inventory":
+          response = await getInventoryReport();
+          break;
         default:
           return;
       }
@@ -82,6 +89,22 @@ const Reports = () => {
     fetchReport(activeTab);
   };
 
+  const handleExport = (format) => {
+    try {
+      const params = {};
+      if (activeTab === "sales" || activeTab === "expenses") {
+        params.start_date = dateRange.start;
+        params.end_date = dateRange.end;
+      }
+
+      const url = exportReport(activeTab, format, params);
+      window.location.href = url;
+      toast.success(`Exporting ${activeTab} report as ${format.toUpperCase()}...`);
+    } catch (error) {
+      toast.error("Failed to export report");
+    }
+  };
+
   return (
     <div className="space-y-6 animate-fade-in" data-testid="reports-page">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -89,10 +112,20 @@ const Reports = () => {
           <h1 className="text-2xl font-bold font-heading text-slate-900">Reports</h1>
           <p className="text-slate-500 mt-1">Business insights and summaries</p>
         </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => handleExport("csv")} data-testid="export-csv-btn">
+            <Download className="h-4 w-4 mr-2" />
+            Export CSV
+          </Button>
+          <Button variant="outline" onClick={() => handleExport("excel")} data-testid="export-excel-btn">
+            <FileText className="h-4 w-4 mr-2" />
+            Export Excel
+          </Button>
+        </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-5 lg:w-auto lg:inline-grid">
+        <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6 lg:w-auto lg:inline-grid h-auto">
           <TabsTrigger value="outstanding" data-testid="tab-outstanding">
             <Users className="h-4 w-4 mr-2 hidden sm:inline" />
             Outstanding
@@ -112,6 +145,10 @@ const Reports = () => {
           <TabsTrigger value="cash-bank" data-testid="tab-cash-bank">
             <Banknote className="h-4 w-4 mr-2 hidden sm:inline" />
             Cash/Bank
+          </TabsTrigger>
+          <TabsTrigger value="inventory" data-testid="tab-inventory">
+            <Package className="h-4 w-4 mr-2 hidden sm:inline" />
+            Inventory
           </TabsTrigger>
         </TabsList>
 
@@ -463,9 +500,8 @@ const Reports = () => {
                               <p className="text-xs text-slate-500">{formatDate(t.date)}</p>
                             </div>
                             <p
-                              className={`font-mono text-sm ${
-                                t.debit > 0 ? "text-emerald-600" : "text-rose-600"
-                              }`}
+                              className={`font-mono text-sm ${t.debit > 0 ? "text-emerald-600" : "text-rose-600"
+                                }`}
                             >
                               {t.debit > 0 ? "+" : "-"}
                               {formatCurrency(t.debit > 0 ? t.debit : t.credit)}
@@ -497,9 +533,8 @@ const Reports = () => {
                               <p className="text-xs text-slate-500">{formatDate(t.date)}</p>
                             </div>
                             <p
-                              className={`font-mono text-sm ${
-                                t.debit > 0 ? "text-emerald-600" : "text-rose-600"
-                              }`}
+                              className={`font-mono text-sm ${t.debit > 0 ? "text-emerald-600" : "text-rose-600"
+                                }`}
                             >
                               {t.debit > 0 ? "+" : "-"}
                               {formatCurrency(t.debit > 0 ? t.debit : t.credit)}
@@ -514,6 +549,68 @@ const Reports = () => {
                 </Card>
               </div>
             </div>
+          )}
+        </TabsContent>
+
+        {/* Inventory Report */}
+        <TabsContent value="inventory" className="mt-4">
+          {loading ? (
+            <ReportSkeleton />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                  <span>Inventory Value</span>
+                  <span className="text-xl font-mono text-brand-600">
+                    {formatCurrency(data?.total_value || 0)}
+                  </span>
+                </CardTitle>
+                <CardDescription>Current stock valuation (Cost Price)</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {data?.report?.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Product</TableHead>
+                        <TableHead>SKU</TableHead>
+                        <TableHead className="text-right">Stock</TableHead>
+                        <TableHead className="text-right">Cost Price</TableHead>
+                        <TableHead className="text-right">Value</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.report.map((item) => (
+                        <TableRow key={item.product_id}>
+                          <TableCell className="font-medium">
+                            <div className="flex flex-col">
+                              <span>{item.product_name}</span>
+                              {item.is_low_stock && (
+                                <span className="text-xs text-rose-600">Low Stock</span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-slate-500 text-xs">{item.sku || "-"}</TableCell>
+                          <TableCell className="text-right font-mono">
+                            <span className={item.is_low_stock ? "text-rose-600 font-bold" : ""}>
+                              {item.current_stock}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-slate-500">
+                            {formatCurrency(item.cost_price)}
+                          </TableCell>
+                          <TableCell className="text-right font-mono font-medium text-brand-600">
+                            {formatCurrency(item.value)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <EmptyState message="No inventory items found" />
+                )}
+              </CardContent>
+            </Card>
           )}
         </TabsContent>
       </Tabs>

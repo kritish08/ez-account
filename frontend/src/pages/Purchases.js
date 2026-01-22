@@ -89,7 +89,7 @@ const Purchases = () => {
       items: prev.items.map((item, i) => {
         if (i !== index) return item;
         const updatedItem = { ...item, [field]: value };
-        
+
         // Auto-fill cost price when product is selected
         if (field === "product_id") {
           const product = products.find((p) => p.id === value);
@@ -112,11 +112,11 @@ const Purchases = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     const validItems = formData.items.filter(
       (item) => item.product_id && parseFloat(item.quantity) > 0 && parseFloat(item.cost_price) > 0
     );
-    
+
     if (validItems.length === 0) {
       toast.error("Please add at least one item with quantity and price");
       return;
@@ -125,7 +125,7 @@ const Purchases = () => {
     setSaving(true);
     try {
       const payload = {
-        supplier_id: formData.supplier_id || null,
+        supplier_id: (formData.supplier_id && formData.supplier_id !== "no_supplier") ? formData.supplier_id : null,
         payment_status: formData.payment_status,
         date: formData.date,
         notes: formData.notes || null,
@@ -135,7 +135,7 @@ const Purchases = () => {
           cost_price: parseFloat(item.cost_price),
         })),
       };
-      
+
       const response = await createPurchase(payload);
       toast.success(`Purchase ${response.data.purchase_number} recorded!`);
       setDialogOpen(false);
@@ -189,7 +189,7 @@ const Purchases = () => {
                       <SelectValue placeholder="Select supplier" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">No supplier</SelectItem>
+                      <SelectItem value="no_supplier">No supplier</SelectItem>
                       {suppliers.map((s) => (<SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>))}
                     </SelectContent>
                   </Select>

@@ -111,6 +111,12 @@ const InvoiceDetail = () => {
               </Button>
             </Link>
           )}
+          <Link to={`/invoices/${id}/edit`}>
+            <Button variant="outline" data-testid="edit-invoice-btn">
+              <FileText className="h-4 w-4 mr-2" />
+              Edit
+            </Button>
+          </Link>
           <Button
             onClick={handleDownloadPDF}
             className="bg-brand-600 hover:bg-brand-700"
