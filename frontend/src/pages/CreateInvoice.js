@@ -75,7 +75,7 @@ const CreateInvoice = () => {
       items: prev.items.map((item, i) => {
         if (i !== index) return item;
         const updatedItem = { ...item, [field]: field === "quantity" || field === "rate" ? parseFloat(value) || 0 : value };
-        
+
         // Auto-fill when product is selected
         if (field === "product_id" && value) {
           const product = products.find((p) => p.id === value);
@@ -84,7 +84,7 @@ const CreateInvoice = () => {
             updatedItem.rate = product.selling_price;
           }
         }
-        
+
         // Clear product_id if description is manually changed
         if (field === "description" && item.product_id) {
           const product = products.find((p) => p.id === item.product_id);
@@ -92,7 +92,7 @@ const CreateInvoice = () => {
             updatedItem.product_id = "";
           }
         }
-        
+
         return updatedItem;
       }),
     }));
@@ -104,12 +104,12 @@ const CreateInvoice = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     if (!formData.customer_id) {
       toast.error("Please select a customer");
       return;
     }
-    
+
     const validItems = formData.items.filter((item) => item.description && item.rate > 0);
     if (validItems.length === 0) {
       toast.error("Please add at least one item");
@@ -124,27 +124,27 @@ const CreateInvoice = () => {
         notes: formData.notes || null,
         is_draft: formData.is_draft,
         items: validItems.map((item) => ({
-          product_id: item.product_id || null,
+          product_id: (item.product_id && item.product_id !== "manual_entry") ? item.product_id : null,
           description: item.description,
           quantity: item.quantity,
           rate: item.rate,
         })),
       };
-      
+
       const response = await createInvoice(payload);
-      
+
       let message = `Invoice ${response.data.invoice_number} created!`;
       if (response.data.credit_applied > 0) {
         message += ` ${formatCurrency(response.data.credit_applied)} customer credit applied automatically.`;
       }
       toast.success(message);
-      
+
       if (response.data.stock_warnings?.length > 0) {
         toast.warning(response.data.warning_message, {
           description: response.data.stock_warnings.map((w) => `${w.product}: ${w.current_stock} in stock`).join(", "),
         });
       }
-      
+
       navigate(`/invoices/${response.data.id}`);
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to create invoice");
@@ -225,14 +225,14 @@ const CreateInvoice = () => {
                   <Label className="text-xs text-slate-500">Product or Description</Label>
                   <div className="space-y-2">
                     <Select
-                      value={item.product_id}
+                      value={item.product_id || "manual_entry"}
                       onValueChange={(value) => handleItemChange(index, "product_id", value)}
                     >
                       <SelectTrigger data-testid={`item-product-${index}`}>
                         <SelectValue placeholder="Select product (optional)" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="">Free text item</SelectItem>
+                        <SelectItem value="manual_entry">Free text item</SelectItem>
                         {products.map((p) => (
                           <SelectItem key={p.id} value={p.id}>
                             <div className="flex items-center gap-2">
@@ -252,7 +252,7 @@ const CreateInvoice = () => {
                     />
                   </div>
                 </div>
-                
+
                 <div className="col-span-4 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Qty</Label>
                   <Input
@@ -265,7 +265,7 @@ const CreateInvoice = () => {
                     data-testid={`item-qty-${index}`}
                   />
                 </div>
-                
+
                 <div className="col-span-4 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Rate</Label>
                   <div className="relative">
@@ -281,14 +281,14 @@ const CreateInvoice = () => {
                     />
                   </div>
                 </div>
-                
+
                 <div className="col-span-3 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Amount</Label>
                   <div className="h-10 flex items-center font-mono font-medium text-slate-900">
                     {formatCurrency(item.quantity * item.rate)}
                   </div>
                 </div>
-                
+
                 <div className="col-span-1 flex justify-end">
                   <Button
                     type="button"
@@ -325,7 +325,7 @@ const CreateInvoice = () => {
                   rows={3}
                   data-testid="invoice-notes-input"
                 />
-                
+
                 <div className="flex items-center space-x-2 pt-2">
                   <Checkbox
                     id="is_draft"
