@@ -35,7 +35,10 @@ import {
   Loader2,
   AlertTriangle,
   Database,
+  Lock,
 } from "lucide-react";
+import { Switch } from "../components/ui/switch";
+import { getSystemSettings, updateSystemSettings } from "../lib/api";
 
 const Settings = () => {
   const [loading, setLoading] = useState(true);
@@ -53,6 +56,8 @@ const Settings = () => {
     region: "ap-south-1",
   });
   const [connectionStatus, setConnectionStatus] = useState(null);
+  const [systemSettings, setSystemSettings] = useState({ registration_enabled: false });
+  const [updatingSystem, setUpdatingSystem] = useState(false);
 
   useEffect(() => {
     fetchSettings();
@@ -60,11 +65,12 @@ const Settings = () => {
 
   const fetchSettings = async () => {
     try {
-      const [settingsRes, backupsRes] = await Promise.all([
+      const [settingsRes, backupsRes, systemRes] = await Promise.all([
         getS3Settings(),
         listBackups().catch(() => ({ data: { backups: [] } })),
+        getSystemSettings().catch(() => ({ data: { registration_enabled: false } })),
       ]);
-      
+
       if (settingsRes.data && settingsRes.data.configured) {
         setS3Settings({
           aws_access_key_id: settingsRes.data.aws_access_key_id || "",
@@ -74,8 +80,9 @@ const Settings = () => {
         });
         setConnectionStatus("connected");
       }
-      
+
       setBackups(backupsRes.data.backups || []);
+      setSystemSettings(systemRes.data);
     } catch (error) {
       console.error("Failed to load settings:", error);
     } finally {
@@ -142,7 +149,7 @@ const Settings = () => {
 
   const handleRestore = async () => {
     if (!selectedBackup) return;
-    
+
     setRestoring(true);
     try {
       await restoreBackup(selectedBackup);
@@ -164,6 +171,22 @@ const Settings = () => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
+  const handleSystemSettingsChange = async (checked) => {
+    setUpdatingSystem(true);
+    const newSettings = { ...systemSettings, registration_enabled: checked };
+    setSystemSettings(newSettings); // Optimistic update
+
+    try {
+      await updateSystemSettings(newSettings);
+      toast.success(checked ? "Registration enabled" : "Registration disabled");
+    } catch (error) {
+      setSystemSettings(systemSettings); // Revert on error
+      toast.error("Failed to update system settings");
+    } finally {
+      setUpdatingSystem(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -179,6 +202,30 @@ const Settings = () => {
         <h1 className="text-2xl font-bold font-heading text-slate-900">Settings</h1>
         <p className="text-slate-500 mt-1">Manage backups and cloud storage</p>
       </div>
+
+      {/* System Settings */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="h-5 w-5 text-brand-600" />
+            System Configuration
+          </CardTitle>
+          <CardDescription>Manage global APPLICATION settings</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between p-4 border rounded-lg">
+            <div className="space-y-0.5">
+              <Label className="text-base">User Registration</Label>
+              <p className="text-sm text-slate-500">Allow new users to create accounts (public registration)</p>
+            </div>
+            <Switch
+              checked={systemSettings.registration_enabled}
+              onCheckedChange={handleSystemSettingsChange}
+              disabled={updatingSystem}
+            />
+          </div>
+        </CardContent>
+      </Card>
 
       {/* S3 Configuration */}
       <Card>
@@ -322,7 +369,7 @@ const Settings = () => {
               Restore Backup
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This will replace all current data with data from the backup "{selectedBackup}". 
+              This will replace all current data with data from the backup "{selectedBackup}".
               This action cannot be undone. Make sure to create a new backup first if you want to preserve current data.
             </AlertDialogDescription>
           </AlertDialogHeader>

@@ -45,7 +45,7 @@ MASTER_ENCRYPTION_KEY = os.environ.get('MASTER_ENCRYPTION_KEY', '')
 # Password hashing
 security = HTTPBearer()
 
-app = FastAPI(title="EZ Accounts API", version="2.0.0")
+app = FastAPI(title="EZ Accounts by Kyrex API", version="2.0.0")
 api_router = APIRouter(prefix="/api")
 
 # Configure logging
@@ -149,6 +149,9 @@ class S3Settings(BaseModel):
     aws_secret_access_key: str
     bucket_name: str
     region: str = "us-east-1"
+
+class SystemSettings(BaseModel):
+    registration_enabled: bool = False
 
 # ============== AUTH HELPERS ==============
 
@@ -398,6 +401,11 @@ async def delete_stock_movements(ref_type: str, ref_id: str):
 
 @api_router.post("/auth/register", response_model=Token)
 async def register(user: UserCreate):
+    # Check if registration is enabled
+    settings = await db.settings.find_one({"type": "system"})
+    if not settings or not settings.get("registration_enabled", False):
+        raise HTTPException(status_code=403, detail="Registration is currently closed")
+
     existing = await db.users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -1744,6 +1752,33 @@ async def test_s3_connection(settings: S3Settings, current_user: dict = Depends(
         elif error_code == '403':
             return {"success": False, "message": "Access denied to bucket"}
         return {"success": False, "message": f"Error: {str(e)}"}
+
+@api_router.get("/auth/config")
+async def get_auth_config():
+    """Get public authentication configuration"""
+    settings = await db.settings.find_one({"type": "system"}, {"_id": 0})
+    return {
+        "registration_enabled": settings.get("registration_enabled", False) if settings else False
+    }
+
+@api_router.get("/settings/system")
+async def get_system_settings(current_user: dict = Depends(get_current_user)):
+    """Get system settings"""
+    settings = await db.settings.find_one({"type": "system"}, {"_id": 0})
+    if not settings:
+        return {"registration_enabled": False}
+    return settings
+
+@api_router.post("/settings/system")
+async def update_system_settings(settings: SystemSettings, current_user: dict = Depends(get_current_user)):
+    """Update system settings"""
+    settings_doc = {
+        "type": "system",
+        **settings.model_dump(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.settings.update_one({"type": "system"}, {"$set": settings_doc}, upsert=True)
+    return {"message": "System settings updated successfully"}
 
 @api_router.post("/backup/create")
 async def create_backup(current_user: dict = Depends(get_current_user)):
