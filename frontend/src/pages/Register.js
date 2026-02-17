@@ -7,14 +7,33 @@ import { Label } from "../components/ui/label";
 import { toast } from "sonner";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
+import { getAuthConfig } from "../lib/api";
+
 const Register = () => {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
+  const [checkingConfig, setCheckingConfig] = useState(true);
   const { register } = useAuth();
   const navigate = useNavigate();
+
+  React.useEffect(() => {
+    checkRegistrationStatus();
+  }, []);
+
+  const checkRegistrationStatus = async () => {
+    try {
+      const response = await getAuthConfig();
+      setRegistrationEnabled(response.data.registration_enabled);
+    } catch (error) {
+      console.error("Failed to check registration status");
+    } finally {
+      setCheckingConfig(false);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -26,7 +45,7 @@ const Register = () => {
       toast.error("Password must be at least 6 characters");
       return;
     }
-    
+
     setLoading(true);
     try {
       await register(email, password, name);
@@ -39,6 +58,34 @@ const Register = () => {
     }
   };
 
+  if (checkingConfig) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Loader2 className="h-8 w-8 animate-spin text-brand-600" />
+      </div>
+    );
+  }
+
+  if (!registrationEnabled) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+        <div className="max-w-md w-full text-center space-y-4">
+          <div className="bg-white p-8 rounded-lg shadow-sm border border-slate-200">
+            <h1 className="text-2xl font-bold text-slate-900 mb-2">Registration Closed</h1>
+            <p className="text-slate-500 mb-6">
+              New account registration is currently disabled by the administrator. Please contact support if you need access.
+            </p>
+            <Link to="/login">
+              <Button className="w-full bg-brand-600 hover:bg-brand-700">
+                Back to Login
+              </Button>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex">
       {/* Left side - Image */}
@@ -50,7 +97,7 @@ const Register = () => {
       >
         <div className="absolute inset-0 bg-slate-900/60" />
         <div className="relative z-10 flex flex-col justify-end p-12 text-white">
-          <h1 className="text-4xl font-bold font-heading mb-4">EZ Accounts</h1>
+          <h1 className="text-4xl font-bold font-heading mb-4">EZ Accounts by Kyrex</h1>
           <p className="text-lg text-slate-200">
             Simple accounting for your wholesale business. No complexity, just results.
           </p>
@@ -61,7 +108,7 @@ const Register = () => {
       <div className="flex-1 flex items-center justify-center p-8 bg-slate-50">
         <div className="w-full max-w-md">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold font-heading text-slate-900 lg:hidden mb-2">EZ Accounts</h1>
+            <h1 className="text-3xl font-bold font-heading text-slate-900 lg:hidden mb-2">EZ Accounts by Kyrex</h1>
             <h2 className="text-2xl font-semibold font-heading text-slate-900">Create your account</h2>
             <p className="text-slate-500 mt-2">Get started with simple accounting</p>
           </div>

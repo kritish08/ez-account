@@ -66,7 +66,7 @@ export const getPayments = () => axios.get(`${API}/payments`);
 export const createPayment = (data) => axios.post(`${API}/payments`, data);
 
 // Supplier Payments
-export const createSupplierPayment = (data) => 
+export const createSupplierPayment = (data) =>
   axios.post(`${API}/supplier-payments`, null, { params: data });
 
 // Expenses
@@ -79,17 +79,17 @@ export const getDashboard = () => axios.get(`${API}/dashboard`);
 // Reports
 export const getOutstandingReport = () => axios.get(`${API}/reports/outstanding`);
 export const getCreditReport = () => axios.get(`${API}/reports/credit`);
-export const getSalesReport = (startDate, endDate) => 
+export const getSalesReport = (startDate, endDate) =>
   axios.get(`${API}/reports/sales`, { params: { start_date: startDate, end_date: endDate } });
-export const getExpensesReport = (startDate, endDate) => 
+export const getExpensesReport = (startDate, endDate) =>
   axios.get(`${API}/reports/expenses`, { params: { start_date: startDate, end_date: endDate } });
 export const getCashBankReport = () => axios.get(`${API}/reports/cash-bank`);
 export const getInventoryReport = () => axios.get(`${API}/reports/inventory`);
 export const getLowStockReport = () => axios.get(`${API}/reports/low-stock`);
-export const getStockMovementReport = (productId, startDate, endDate) => 
+export const getStockMovementReport = (productId, startDate, endDate) =>
   axios.get(`${API}/reports/stock-movement`, { params: { product_id: productId, start_date: startDate, end_date: endDate } });
 export const getSupplierPayablesReport = () => axios.get(`${API}/reports/supplier-payables`);
-export const getProfitReport = (startDate, endDate) => 
+export const getProfitReport = (startDate, endDate) =>
   axios.get(`${API}/reports/profit`, { params: { start_date: startDate, end_date: endDate } });
 
 // Export
@@ -107,3 +107,8 @@ export const testS3Connection = (data) => axios.post(`${API}/settings/s3/test`, 
 export const createBackup = () => axios.post(`${API}/backup/create`);
 export const listBackups = () => axios.get(`${API}/backup/list`);
 export const restoreBackup = (filename) => axios.post(`${API}/backup/restore/${filename}`);
+
+// System Settings
+export const getAuthConfig = () => axios.get(`${API}/auth/config`);
+export const getSystemSettings = () => axios.get(`${API}/settings/system`);
+export const updateSystemSettings = (data) => axios.post(`${API}/settings/system`, data);
