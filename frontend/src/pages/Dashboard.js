@@ -14,6 +14,9 @@ import {
   FileText,
   ArrowRight,
   Plus,
+  AlertTriangle,
+  Receipt,
+  Package,
 } from "lucide-react";
 
 const StatCard = ({ icon: Icon, label, value, subValue, color }) => (
@@ -98,6 +101,26 @@ const Dashboard = () => {
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <StatCard
+          icon={TrendingUp}
+          label="Today's Sales"
+          value={formatCurrency(data?.today_sales)}
+          color="text-emerald-600"
+        />
+        <StatCard
+          icon={Calendar}
+          label="Monthly Sales"
+          value={formatCurrency(data?.monthly_sales)}
+          subValue="This month"
+          color="text-brand-600"
+        />
+        <StatCard
+          icon={Receipt}
+          label="Monthly Expenses"
+          value={formatCurrency(data?.monthly_expenses)}
+          subValue="This month"
+          color="text-rose-600"
+        />
+        <StatCard
           icon={Banknote}
           label="Cash Balance"
           value={formatCurrency(data?.cash_balance)}
@@ -113,28 +136,29 @@ const Dashboard = () => {
           icon={Users}
           label="Outstanding from Customers"
           value={formatCurrency(data?.total_outstanding)}
-          subValue="Amount to collect"
+          subValue={`${data?.total_customers || 0} customers`}
           color="text-amber-600"
         />
         <StatCard
           icon={CreditCard}
-          label="Customer Credit"
-          value={formatCurrency(data?.total_credit)}
-          subValue="Advance received"
-          color="text-indigo-600"
+          label="Supplier Payable"
+          value={formatCurrency(data?.total_payable)}
+          subValue={`${data?.total_suppliers || 0} suppliers`}
+          color="text-orange-600"
         />
         <StatCard
-          icon={TrendingUp}
-          label="Today's Sales"
-          value={formatCurrency(data?.today_sales)}
-          color="text-emerald-600"
+          icon={AlertTriangle}
+          label="Overdue Invoices"
+          value={data?.overdue_count || 0}
+          subValue={data?.overdue_count > 0 ? "Needs attention" : "All clear"}
+          color={data?.overdue_count > 0 ? "text-rose-600" : "text-emerald-600"}
         />
         <StatCard
-          icon={Calendar}
-          label="Monthly Sales"
-          value={formatCurrency(data?.monthly_sales)}
-          subValue="This month"
-          color="text-brand-600"
+          icon={Package}
+          label="Low Stock Products"
+          value={data?.low_stock_count || 0}
+          subValue={`of ${data?.total_products || 0} products`}
+          color={data?.low_stock_count > 0 ? "text-amber-600" : "text-emerald-600"}
         />
       </div>
 

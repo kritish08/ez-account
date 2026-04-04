@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Link } from "react-router-dom";
-import { getCustomers, createCustomer, formatCurrency } from "../lib/api";
+import { getCustomers, createCustomer, updateCustomer, deleteCustomer, formatCurrency } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Card, CardContent } from "../components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -28,16 +29,39 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
-import { Plus, Search, Users, Phone, Loader2, ChevronRight } from "lucide-react";
+import { Plus, Search, Users, Phone, Loader2, ChevronRight, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
 const Customers = () => {
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [customerToDelete, setCustomerToDelete] = useState(null);
+
   const [formData, setFormData] = useState({
     name: "",
     phone: "",
@@ -70,6 +94,50 @@ const Customers = () => {
     }));
   };
 
+  const resetForm = () => {
+    setFormData({
+      name: "",
+      phone: "",
+      address: "",
+      gstin: "",
+      opening_balance: 0,
+      balance_type: "debit",
+    });
+    setEditingCustomer(null);
+  };
+
+  const handleEdit = (customer) => {
+    setEditingCustomer(customer);
+    setFormData({
+      name: customer.name,
+      phone: customer.phone || "",
+      address: customer.address || "",
+      gstin: customer.gstin || "",
+      opening_balance: 0, // Not editable
+      balance_type: "debit", // Not editable
+    });
+    setDialogOpen(true);
+  };
+
+  const handleDeleteClick = (customer) => {
+    setCustomerToDelete(customer);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!customerToDelete) return;
+    try {
+      await deleteCustomer(customerToDelete.id);
+      toast.success("Customer deleted successfully");
+      fetchCustomers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to delete customer");
+    } finally {
+      setDeleteDialogOpen(false);
+      setCustomerToDelete(null);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!formData.name) {
@@ -79,20 +147,19 @@ const Customers = () => {
 
     setSaving(true);
     try {
-      await createCustomer(formData);
-      toast.success("Customer added successfully");
+      if (editingCustomer) {
+        await updateCustomer(editingCustomer.id, formData);
+        toast.success("Customer updated successfully");
+      } else {
+        await createCustomer(formData);
+        toast.success("Customer added successfully");
+      }
+
       setDialogOpen(false);
-      setFormData({
-        name: "",
-        phone: "",
-        address: "",
-        gstin: "",
-        opening_balance: 0,
-        balance_type: "debit",
-      });
+      resetForm();
       fetchCustomers();
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Failed to add customer");
+      toast.error(error.response?.data?.detail || "Failed to save customer");
     } finally {
       setSaving(false);
     }
@@ -112,7 +179,10 @@ const Customers = () => {
           <p className="text-slate-500 mt-1">Manage your customers and their balances</p>
         </div>
 
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={(open) => {
+          setDialogOpen(open);
+          if (!open) resetForm();
+        }}>
           <DialogTrigger asChild>
             <Button className="bg-brand-600 hover:bg-brand-700" data-testid="add-customer-btn">
               <Plus className="h-4 w-4 mr-2" />
@@ -121,8 +191,8 @@ const Customers = () => {
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Add New Customer</DialogTitle>
-              <DialogDescription>Enter customer details below</DialogDescription>
+              <DialogTitle>{editingCustomer ? "Edit Customer" : "Add New Customer"}</DialogTitle>
+              <DialogDescription>{editingCustomer ? "Update customer details below" : "Enter customer details below"}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4 mt-4">
               <div className="space-y-2">
@@ -173,42 +243,44 @@ const Customers = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="opening_balance">Opening Balance</Label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
-                    <Input
-                      id="opening_balance"
-                      name="opening_balance"
-                      type="number"
-                      step="0.01"
-                      value={formData.opening_balance}
-                      onChange={handleChange}
-                      className="pl-8 font-mono"
-                      data-testid="customer-balance-input"
-                    />
+              {!editingCustomer && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="opening_balance">Opening Balance</Label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
+                      <Input
+                        id="opening_balance"
+                        name="opening_balance"
+                        type="number"
+                        step="0.01"
+                        value={formData.opening_balance}
+                        onChange={handleChange}
+                        className="pl-8 font-mono"
+                        data-testid="customer-balance-input"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="balance_type">Balance Type</Label>
+                    <Select
+                      value={formData.balance_type}
+                      onValueChange={(value) =>
+                        setFormData((prev) => ({ ...prev, balance_type: value }))
+                      }
+                    >
+                      <SelectTrigger data-testid="customer-balance-type-select">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="debit">They owe us</SelectItem>
+                        <SelectItem value="credit">We owe them</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="balance_type">Balance Type</Label>
-                  <Select
-                    value={formData.balance_type}
-                    onValueChange={(value) =>
-                      setFormData((prev) => ({ ...prev, balance_type: value }))
-                    }
-                  >
-                    <SelectTrigger data-testid="customer-balance-type-select">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="debit">They owe us</SelectItem>
-                      <SelectItem value="credit">We owe them</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-4">
                 <Button
@@ -227,10 +299,10 @@ const Customers = () => {
                   {saving ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Saving...
+                      {editingCustomer ? "Updating..." : "Saving..."}
                     </>
                   ) : (
-                    "Add Customer"
+                    editingCustomer ? "Update Customer" : "Add Customer"
                   )}
                 </Button>
               </div>
@@ -238,6 +310,31 @@ const Customers = () => {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Delete Alert Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the customer "{customerToDelete?.name}".
+              This action cannot be undone.
+              {customerToDelete && (customerToDelete.outstanding !== 0 || customerToDelete.credit > 0) && (
+                <div className="mt-2 text-amber-600 font-medium bg-amber-50 p-2 rounded border border-amber-200">
+                  Warning: This customer has a balance of {formatCurrency(customerToDelete.outstanding)} (Outstanding)
+                  and {formatCurrency(customerToDelete.credit)} (Credit).
+                </div>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Search */}
       <div className="relative max-w-md">
@@ -272,28 +369,36 @@ const Customers = () => {
                   <TableHead>Phone</TableHead>
                   <TableHead className="text-right">Outstanding</TableHead>
                   <TableHead className="text-right">Credit</TableHead>
-                  <TableHead></TableHead>
+                  <TableHead className="w-[100px]"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filteredCustomers.map((customer) => (
-                  <TableRow key={customer.id} data-testid={`customer-row-${customer.id}`}>
+                  <TableRow
+                    key={customer.id}
+                    className="cursor-pointer hover:bg-slate-50"
+                    onClick={(e) => {
+                      if (e.target.closest('button')) return;
+                      navigate(`/customers/${customer.id}`);
+                    }}
+                    data-testid={`customer-row-${customer.id}`}
+                  >
                     <TableCell>
-                      <div className="flex items-center gap-3">
+                      <Link to={`/customers/${customer.id}`} className="flex items-center gap-3 group">
                         <div className="w-9 h-9 rounded-full bg-brand-50 flex items-center justify-center">
                           <span className="text-sm font-medium text-brand-700">
                             {customer.name.charAt(0).toUpperCase()}
                           </span>
                         </div>
                         <div>
-                          <p className="font-medium text-slate-900">{customer.name}</p>
+                          <p className="font-medium text-slate-900 group-hover:text-brand-600 transition-colors">{customer.name}</p>
                           {customer.address && (
                             <p className="text-sm text-slate-500 truncate max-w-[200px]">
                               {customer.address}
                             </p>
                           )}
                         </div>
-                      </div>
+                      </Link>
                     </TableCell>
                     <TableCell>
                       {customer.phone && (
@@ -322,11 +427,36 @@ const Customers = () => {
                       )}
                     </TableCell>
                     <TableCell>
-                      <Link to={`/customers/${customer.id}`}>
-                        <Button variant="ghost" size="sm">
-                          <ChevronRight className="h-4 w-4" />
-                        </Button>
-                      </Link>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-8 w-8 p-0" data-testid={`customer-actions-${customer.id}`}>
+                            <span className="sr-only">Open menu</span>
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                          <DropdownMenuItem onClick={() => handleEdit(customer)} data-testid={`edit-customer-${customer.id}`}>
+                            <Pencil className="mr-2 h-4 w-4" />
+                            Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem asChild>
+                            <Link to={`/customers/${customer.id}`} className="flex items-center w-full cursor-default">
+                              <ChevronRight className="mr-2 h-4 w-4" />
+                              View Details
+                            </Link>
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onClick={() => handleDeleteClick(customer)}
+                            className="text-red-600 focus:text-red-600"
+                            data-testid={`delete-customer-${customer.id}`}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 ))}

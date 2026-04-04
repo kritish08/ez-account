@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
-import { getInvoices, formatCurrency, formatDate } from "../lib/api";
+import { Link, useNavigate } from "react-router-dom";
+import { getInvoices, deleteInvoice, formatCurrency, formatDate } from "../lib/api";
+import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import {
@@ -18,29 +19,67 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
-import { Plus, FileText, ChevronRight, Filter } from "lucide-react";
+import { Plus, FileText, Eye, MoreHorizontal, Trash2 } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { UIFilters } from "../components/UIFilters";
+import { Badge } from "../components/ui/badge";
 
+const statusBadgeVariant = {
+  draft: "secondary",
+  unpaid: "destructive",
+  partially_paid: "warning",
+  paid: "success",
+};
+// specific styling if variants aren't standard in default shadcn
 const statusBadgeClass = {
-  unpaid: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20",
-  partially_paid: "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20",
-  paid: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20",
+  draft: "bg-slate-100 text-slate-700 hover:bg-slate-100",
+  unpaid: "bg-rose-100 text-rose-700 hover:bg-rose-100",
+  partially_paid: "bg-amber-100 text-amber-700 hover:bg-amber-100",
+  paid: "bg-emerald-100 text-emerald-700 hover:bg-emerald-100",
 };
 
 const Invoices = () => {
+  const navigate = useNavigate();
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [dateRange, setDateRange] = useState(undefined);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [invoiceToDelete, setInvoiceToDelete] = useState(null);
 
   useEffect(() => {
     fetchInvoices();
-  }, [statusFilter]);
+  }, [statusFilter, dateRange]);
 
   const fetchInvoices = async () => {
     try {
+      setLoading(true);
       const status = statusFilter === "all" ? null : statusFilter;
-      const response = await getInvoices(status);
+      const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+      const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+
+      const response = await getInvoices(status, startDate, endDate);
       setInvoices(response.data);
     } catch (error) {
       toast.error("Failed to load invoices");
@@ -51,35 +90,70 @@ const Invoices = () => {
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="invoices-page">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold font-heading text-slate-900">Invoices</h1>
-          <p className="text-slate-500 mt-1">Create and manage your sales invoices</p>
-        </div>
+      <PageHeader
+        title="Invoices"
+        description="Create and manage your sales invoices"
+        action={
+          <Link to="/invoices/new">
+            <Button className="bg-brand-600 hover:bg-brand-700 shadow-sm">
+              <Plus className="h-4 w-4 mr-2" />
+              Create Invoice
+            </Button>
+          </Link>
+        }
+      />
 
-        <Link to="/invoices/new">
-          <Button className="bg-brand-600 hover:bg-brand-700" data-testid="create-invoice-btn">
-            <Plus className="h-4 w-4 mr-2" />
-            Create Invoice
-          </Button>
-        </Link>
-      </div>
+      {/* Delete Alert Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Invoice?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete invoice {invoiceToDelete?.invoice_number} of {invoiceToDelete && formatCurrency(invoiceToDelete.total)} and reverse all stock movements, ledger entries, and payment allocations. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                try {
+                  await deleteInvoice(invoiceToDelete.id);
+                  toast.success("Invoice deleted & effects reversed");
+                  fetchInvoices();
+                } catch (error) {
+                  toast.error(error.response?.data?.detail || "Failed to delete invoice");
+                } finally {
+                  setDeleteDialogOpen(false);
+                  setInvoiceToDelete(null);
+                }
+              }}
+              className="bg-red-600 hover:bg-red-700"
+            >Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
-      {/* Filter */}
-      <div className="flex items-center gap-2">
-        <Filter className="h-4 w-4 text-slate-400" />
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-[180px]" data-testid="invoice-status-filter">
-            <SelectValue placeholder="Filter by status" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Invoices</SelectItem>
-            <SelectItem value="unpaid">Unpaid</SelectItem>
-            <SelectItem value="partially_paid">Partially Paid</SelectItem>
-            <SelectItem value="paid">Paid</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      {/* Search & Filter */}
+      <UIFilters
+        search={search}
+        setSearch={setSearch}
+        searchPlaceholder="Search invoices..."
+        statusFilter={statusFilter}
+        setStatusFilter={setStatusFilter}
+        statusOptions={[
+          { value: "draft", label: "Draft" },
+          { value: "unpaid", label: "Unpaid" },
+          { value: "partially_paid", label: "Partially Paid" },
+          { value: "paid", label: "Paid" },
+        ]}
+        dateRange={dateRange}
+        setDateRange={setDateRange}
+        onClear={() => {
+          setSearch("");
+          setStatusFilter("all");
+          setDateRange(undefined);
+        }}
+      />
 
       {/* Invoices Table */}
       {loading ? (
@@ -92,7 +166,10 @@ const Invoices = () => {
             </div>
           </CardContent>
         </Card>
-      ) : invoices.length > 0 ? (
+      ) : invoices.filter((inv) => {
+        const q = search.toLowerCase();
+        return !q || inv.invoice_number?.toLowerCase().includes(q) || inv.customer_name?.toLowerCase().includes(q);
+      }).length > 0 ? (
         <Card>
           <CardContent className="p-0">
             <Table>
@@ -108,8 +185,20 @@ const Invoices = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {invoices.map((invoice) => (
-                  <TableRow key={invoice.id} data-testid={`invoice-row-${invoice.id}`}>
+                {invoices.filter((inv) => {
+                  const q = search.toLowerCase();
+                  return !q || inv.invoice_number?.toLowerCase().includes(q) || inv.customer_name?.toLowerCase().includes(q);
+                }).map((invoice) => (
+                  <TableRow
+                    key={invoice.id}
+                    data-testid={`invoice-row-${invoice.id}`}
+                    className="cursor-pointer hover:bg-slate-50"
+                    onClick={(e) => {
+                      // Prevent navigation if clicking on actions menu
+                      if (e.target.closest('[role="menuitem"]') || e.target.closest('button')) return;
+                      navigate(`/invoices/${invoice.id}`);
+                    }}
+                  >
                     <TableCell>
                       <span className="font-medium text-brand-600">{invoice.invoice_number}</span>
                     </TableCell>
@@ -122,20 +211,31 @@ const Invoices = () => {
                       {invoice.paid_amount > 0 ? formatCurrency(invoice.paid_amount) : "-"}
                     </TableCell>
                     <TableCell>
-                      <span
-                        className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                          statusBadgeClass[invoice.status]
-                        }`}
-                      >
+                      <Badge variant={statusBadgeVariant[invoice.status]} className={statusBadgeClass[invoice.status]}>
                         {invoice.status.replace("_", " ")}
-                      </span>
+                      </Badge>
                     </TableCell>
                     <TableCell>
-                      <Link to={`/invoices/${invoice.id}`}>
-                        <Button variant="ghost" size="sm">
-                          <ChevronRight className="h-4 w-4" />
-                        </Button>
-                      </Link>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-8 w-8 p-0">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                          <DropdownMenuItem onClick={() => navigate(`/invoices/${invoice.id}`)}>
+                            <Eye className="mr-2 h-4 w-4" /> View
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onClick={() => { setInvoiceToDelete(invoice); setDeleteDialogOpen(true); }}
+                            className="text-red-600 focus:text-red-600"
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" /> Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 ))}

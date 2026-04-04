@@ -16,6 +16,8 @@ import {
   Package,
   Truck,
   ShoppingCart,
+  RotateCcw,
+  Undo2,
 } from "lucide-react";
 
 const navItems = [
@@ -27,6 +29,8 @@ const navItems = [
   { to: "/invoices", icon: FileText, label: "Invoices" },
   { to: "/payments", icon: CreditCard, label: "Payments" },
   { to: "/expenses", icon: Receipt, label: "Expenses" },
+  { to: "/credit-notes", icon: RotateCcw, label: "Credit Notes" },
+  { to: "/debit-notes", icon: Undo2, label: "Debit Notes" },
   { to: "/reports", icon: BarChart3, label: "Reports" },
 ];
 

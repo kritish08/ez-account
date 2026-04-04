@@ -1,8 +1,18 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { getInvoice, downloadInvoicePDF, formatCurrency, formatDate } from "../lib/api";
+import { getInvoice, deleteInvoice, downloadInvoicePDF, formatCurrency, formatDate } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
 import {
@@ -11,9 +21,11 @@ import {
   CreditCard,
   FileText,
   Loader2,
+  Trash2,
 } from "lucide-react";
 
 const statusBadgeClass = {
+  draft: "bg-slate-50 text-slate-700 ring-1 ring-inset ring-slate-500/20",
   unpaid: "bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-600/20",
   partially_paid: "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20",
   paid: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20",
@@ -25,6 +37,7 @@ const InvoiceDetail = () => {
   const [invoice, setInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
     fetchInvoice();
@@ -91,9 +104,8 @@ const InvoiceDetail = () => {
                 {invoice.invoice_number}
               </h1>
               <span
-                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                  statusBadgeClass[invoice.status]
-                }`}
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadgeClass[invoice.status]
+                  }`}
               >
                 {invoice.status.replace("_", " ")}
               </span>
@@ -130,8 +142,44 @@ const InvoiceDetail = () => {
             )}
             Download PDF
           </Button>
+          <Button
+            variant="outline"
+            className="text-red-600 border-red-200 hover:bg-red-50"
+            onClick={() => setDeleteDialogOpen(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
         </div>
       </div>
+
+      {/* Delete Alert Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Invoice?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete invoice {invoice.invoice_number} of {formatCurrency(invoice.total)} and reverse all stock movements, ledger entries, and payment allocations. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                try {
+                  await deleteInvoice(id);
+                  toast.success("Invoice deleted & effects reversed");
+                  navigate("/invoices");
+                } catch (error) {
+                  toast.error(error.response?.data?.detail || "Failed to delete invoice");
+                  setDeleteDialogOpen(false);
+                }
+              }}
+              className="bg-red-600 hover:bg-red-700"
+            >Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Invoice Card */}
       <Card>
@@ -197,27 +245,26 @@ const InvoiceDetail = () => {
                 <span className="text-slate-500">Subtotal</span>
                 <span className="font-mono">{formatCurrency(invoice.total)}</span>
               </div>
-              
+
               {invoice.credit_applied > 0 && (
                 <div className="flex justify-between text-sm text-emerald-600">
                   <span>Credit Applied</span>
                   <span className="font-mono">-{formatCurrency(invoice.credit_applied)}</span>
                 </div>
               )}
-              
+
               {invoice.paid_amount > 0 && (
                 <div className="flex justify-between text-sm text-emerald-600">
                   <span>Paid</span>
                   <span className="font-mono">{formatCurrency(invoice.paid_amount)}</span>
                 </div>
               )}
-              
+
               <div className="flex justify-between pt-2 border-t border-slate-200">
                 <span className="font-semibold">Balance Due</span>
                 <span
-                  className={`text-lg font-bold font-mono ${
-                    balanceDue > 0 ? "text-amber-600" : "text-emerald-600"
-                  }`}
+                  className={`text-lg font-bold font-mono ${balanceDue > 0 ? "text-amber-600" : "text-emerald-600"
+                    }`}
                 >
                   {formatCurrency(balanceDue)}
                 </span>
