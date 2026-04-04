@@ -7,7 +7,12 @@ import {
   listBackups,
   restoreBackup,
   formatDate,
+  updateModulesSettings,
+  resetSystem,
+  getSystemSettings,
+  updateSystemSettings,
 } from "../lib/api";
+import { useModules } from "../context/ModulesContext";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -22,6 +27,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
 import {
@@ -37,9 +50,13 @@ import {
   Database,
   Lock,
   Settings as SettingsIcon,
+  Mic,
+  FileDown,
+  FileUp,
+  Package,
+  Trash2,
 } from "lucide-react";
 import { Switch } from "../components/ui/switch";
-import { getSystemSettings, updateSystemSettings } from "../lib/api";
 
 const Settings = () => {
   const [loading, setLoading] = useState(true);
@@ -56,21 +73,63 @@ const Settings = () => {
     bucket_name: "",
     region: "ap-south-1",
   });
+  const [systemSettings, setSystemSettings] = useState({
+    company_name: "",
+    company_email: "",
+    company_phone: "",
+    company_address: "",
+    tax_id: "",
+    default_currency: "₹",
+  });
+  const [savingCompany, setSavingCompany] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(null);
-  const [systemSettings, setSystemSettings] = useState({ registration_enabled: false });
   const [updatingSystem, setUpdatingSystem] = useState(false);
+  const [voiceAssistantEnabled, setVoiceAssistantEnabled] = useState(
+    () => localStorage.getItem('voiceAssistantEnabled') !== 'false'
+  );
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     fetchSettings();
   }, []);
 
+  const handleVoiceToggle = (checked) => {
+    setVoiceAssistantEnabled(checked);
+    localStorage.setItem('voiceAssistantEnabled', String(checked));
+    // Dispatch custom event so VoiceAssistant reacts immediately (same tab)
+    window.dispatchEvent(new CustomEvent('voiceAssistantToggle', { detail: checked }));
+    toast.success(checked ? 'Voice Assistant enabled' : 'Voice Assistant disabled');
+  };
+
+  const { modules, setModules } = useModules();
+  
+  const handleModuleToggle = async (key, checked) => {
+    const newSettings = { ...modules, [key]: checked };
+    setModules(newSettings);
+    try {
+      await updateModulesSettings(newSettings);
+      const moduleName = key === "enable_credit_notes" ? "Credit Notes" : key === "enable_debit_notes" ? "Debit Notes" : "Advanced IMS Features";
+      toast.success(`${moduleName} ${checked ? "enabled" : "disabled"}`);
+    } catch (error) {
+      toast.error("Failed to update module settings");
+      // revert back
+      setModules(modules);
+    }
+  };
+
   const fetchSettings = async () => {
     try {
-      const [settingsRes, backupsRes, systemRes] = await Promise.all([
+      const [settingsRes, backupsRes, sysRes] = await Promise.all([
         getS3Settings(),
         listBackups().catch(() => ({ data: { backups: [] } })),
-        getSystemSettings().catch(() => ({ data: { registration_enabled: false } })),
+        getSystemSettings().catch(() => ({ data: {} }))
       ]);
+
+      if (sysRes.data) {
+        setSystemSettings(prev => ({ ...prev, ...sysRes.data }));
+      }
 
       if (settingsRes.data && settingsRes.data.configured) {
         setS3Settings({
@@ -83,11 +142,22 @@ const Settings = () => {
       }
 
       setBackups(backupsRes.data.backups || []);
-      setSystemSettings(systemRes.data);
     } catch (error) {
       console.error("Failed to load settings:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveCompany = async () => {
+    setSavingCompany(true);
+    try {
+      await updateSystemSettings(systemSettings);
+      toast.success("Company profile saved");
+    } catch (err) {
+      toast.error("Failed to save company profile");
+    } finally {
+      setSavingCompany(false);
     }
   };
 
@@ -164,28 +234,28 @@ const Settings = () => {
     }
   };
 
+  const handleFactoryReset = async () => {
+    if (!resetPassword) return toast.error("Password required");
+    setResetting(true);
+    try {
+      await resetSystem({ password: resetPassword });
+      toast.success("Application reset successfully");
+      setResetDialogOpen(false);
+      window.location.reload();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Factory reset failed");
+    } finally {
+      setResetting(false);
+      setResetPassword("");
+    }
+  };
+
   const formatBytes = (bytes) => {
     if (bytes === 0) return "0 B";
     const k = 1024;
     const sizes = ["B", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-  };
-
-  const handleSystemSettingsChange = async (checked) => {
-    setUpdatingSystem(true);
-    const newSettings = { ...systemSettings, registration_enabled: checked };
-    setSystemSettings(newSettings); // Optimistic update
-
-    try {
-      await updateSystemSettings(newSettings);
-      toast.success(checked ? "Registration enabled" : "Registration disabled");
-    } catch (error) {
-      setSystemSettings(systemSettings); // Revert on error
-      toast.error("Failed to update system settings");
-    } finally {
-      setUpdatingSystem(false);
-    }
   };
 
   if (loading) {
@@ -201,30 +271,115 @@ const Settings = () => {
     <div className="space-y-8 animate-fade-in max-w-3xl" data-testid="settings-page">
       <div>
         <h1 className="text-2xl font-bold font-heading text-slate-900">Settings</h1>
-        <p className="text-slate-500 mt-1">Manage backups and cloud storage</p>
+        <p className="text-slate-500 mt-1">Manage application features, backups and cloud storage</p>
       </div>
 
-      {/* System Settings */}
+      {/* Application Features */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <SettingsIcon className="h-5 w-5 text-brand-600" />
-            System Configuration
+            Application Features
           </CardTitle>
-          <CardDescription>Manage global APPLICATION settings</CardDescription>
+          <CardDescription>Enable or disable application features</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center justify-between p-4 border rounded-lg">
-            <div className="space-y-0.5">
-              <Label className="text-base">User Registration</Label>
-              <p className="text-sm text-slate-500">Allow new users to create accounts (public registration)</p>
+          <div className="flex items-center justify-between p-4 border rounded-lg bg-slate-50/50">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center">
+                <Mic className="h-4 w-4 text-brand-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer">Voice Assistant</Label>
+                <p className="text-sm text-slate-500">
+                  Floating mic button for voice-powered invoice creation
+                </p>
+              </div>
             </div>
             <Switch
-              checked={systemSettings.registration_enabled}
-              onCheckedChange={handleSystemSettingsChange}
-              disabled={updatingSystem}
+              checked={voiceAssistantEnabled}
+              onCheckedChange={handleVoiceToggle}
+              data-testid="voice-assistant-toggle"
             />
           </div>
+
+          <div className="flex items-center justify-between p-4 border rounded-lg bg-slate-50/50">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center">
+                <FileDown className="h-4 w-4 text-brand-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer">Credit Notes</Label>
+                <p className="text-sm text-slate-500">
+                  Enable tracking of Sales Returns via Credit Notes 
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={modules?.enable_credit_notes ?? true}
+              onCheckedChange={(checked) => handleModuleToggle("enable_credit_notes", checked)}
+              data-testid="credit-notes-toggle"
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-4 border rounded-lg bg-slate-50/50">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center">
+                <FileUp className="h-4 w-4 text-brand-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer">Debit Notes</Label>
+                <p className="text-sm text-slate-500">
+                  Enable tracking of Purchase Returns via Debit Notes 
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={modules?.enable_debit_notes ?? true}
+              onCheckedChange={(checked) => handleModuleToggle("enable_debit_notes", checked)}
+              data-testid="debit-notes-toggle"
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-4 border rounded-lg bg-emerald-50/50 border-emerald-100">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-emerald-100 flex items-center justify-center">
+                <Package className="h-4 w-4 text-emerald-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer text-emerald-900">Advanced IMS Features</Label>
+                <p className="text-sm text-emerald-700/80">
+                  Enable Serial Numbers, Batches, and Detailed Stock History
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={modules?.enable_advanced_ims ?? false}
+              onCheckedChange={(checked) => handleModuleToggle("enable_advanced_ims", checked)}
+              data-testid="advanced-ims-toggle"
+            />
+          </div>
+
+          {/* Production Module Toggle */}
+          <div className="flex items-center justify-between rounded-lg border border-violet-200 bg-violet-50 p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-violet-100 flex items-center justify-center">
+                <Package className="h-4 w-4 text-violet-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer text-violet-900">Production Module</Label>
+                <p className="text-sm text-violet-700/80">
+                  Bill of Materials, Work Orders, Raw Material tracking &amp; WIP
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={modules?.enable_production ?? false}
+              onCheckedChange={(checked) => handleModuleToggle("enable_production", checked)}
+              data-testid="production-module-toggle"
+            />
+          </div>
+
         </CardContent>
       </Card>
 
@@ -382,6 +537,66 @@ const Settings = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Danger Zone */}
+      <Card className="border-red-200 border-dashed bg-red-50/30 mt-8">
+        <CardHeader>
+          <CardTitle className="text-red-700 flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5" />
+            Danger Zone
+          </CardTitle>
+          <CardDescription className="text-red-600/80">
+            Irreversible destructive actions for your environment.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between border border-red-100 bg-white p-4 rounded-lg">
+            <div>
+              <h4 className="text-sm font-bold text-slate-900">Factory Reset Application</h4>
+              <p className="text-sm text-slate-500 mt-1">
+                Permanently wipe all invoices, customers, inventory, and accounting ledgers.
+              </p>
+            </div>
+            <Button variant="destructive" onClick={() => setResetDialogOpen(true)}>
+              <Trash2 className="h-4 w-4 mr-2" /> Replace & Reset
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="text-red-600 flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5" />
+              Confirm Factory Reset
+            </DialogTitle>
+            <DialogDescription>
+              This action cannot be undone. All financial data will be permanently wiped. Verify your password to continue.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="password">Administrator Password</Label>
+              <Input
+                id="password"
+                type="password"
+                value={resetPassword}
+                onChange={(e) => setResetPassword(e.target.value)}
+                placeholder="Enter password..."
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResetDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleFactoryReset} disabled={!resetPassword || resetting}>
+              {resetting ? "Erasing..." : "Permanently Erase Database"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

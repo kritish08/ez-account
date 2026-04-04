@@ -1,0 +1,153 @@
+import os
+import io
+import json
+import base64
+import shutil
+import uuid
+import logging
+from openai import AzureOpenAI
+from fastapi import UploadFile, HTTPException
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Logger
+logger = logging.getLogger(__name__)
+
+# Configure Azure OpenAI Client lazy loaded
+client = None
+
+def get_client():
+    global client
+    if client:
+        return client
+    
+    # Try both common names
+    api_key = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY")
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    
+    if not api_key or not endpoint:
+        logger.warning("AZURE_OPENAI_KEY or AZURE_OPENAI_ENDPOINT not set. AI features will fail.")
+        return None
+        
+    # Clean endpoint for AzureOpenAI client (it expects resource root, not full path)
+    # e.g. https://my-resource.openai.azure.com/openai/v1/ -> https://my-resource.openai.azure.com/
+    base_endpoint = endpoint.split("/openai/")[0].rstrip("/")
+    if not base_endpoint.startswith("http"):
+        base_endpoint = "https://" + base_endpoint
+        
+    try:
+        client = AzureOpenAI(
+            api_key=api_key,
+            api_version="2024-02-15-preview",
+            azure_endpoint=base_endpoint
+        )
+        return client
+    except Exception as e:
+        logger.error(f"Error initializing Azure OpenAI client: {e}")
+        return None
+
+async def parse_invoice_image(file: UploadFile):
+    """
+    Parses an uploaded invoice image using Azure OpenAI GPT-4o.
+    Returns extracted JSON data.
+    """
+    # 1. Save the image locally for persistence
+    upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"{uuid.uuid4()}{file_extension}"
+    file_path = os.path.join(upload_dir, unique_filename)
+
+    # Reset file cursor to 0 before reading/saving
+    await file.seek(0)
+
+    try:
+        # Save file to disk
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        # URL to be stored in DB (relative path or full URL depending on how we serve statics)
+        attachment_url = f"/api/uploads/{unique_filename}" 
+
+        # 2. Reset cursor again for AI processing (reading as base64)
+        await file.seek(0)
+        file_content = await file.read()
+        encoded_image = base64.b64encode(file_content).decode('utf-8')
+
+        system_prompt = """
+        You are an AI assistant specialized in extracting data from invoices and receipts.
+
+        CRITICAL PARSING RULES FOR INDIAN BILLS:
+        - Numbers WITHOUT decimal points (e.g., 77, 100, 2000) are WHOLE NUMBERS.
+        - "77" -> 77.00
+        - "770" -> 770.00
+        - DO NOT DIVIDE BY 100. "77" is NOT 0.77.
+        - Numbers WITH explicit decimal points (e.g., 77.50) should be parsed as-is.
+
+        CRITICAL QUANTITY VS AMOUNT RULE:
+        - If a line item shows "1000 * 77 = 77000", the QUANTITY is 1000.
+        - Sometimes the layout is confusing. TRUST THE VISUAL NUMBER.
+        - If math implies a unit conversion (e.g. 77000 / 77 = 1000), but you see "10", LOOK CLOSER.
+        - PRIORITY: Visual representation of quantity > Math inference.
+        - However, if the Visual Quantity is clearly "1000" (e.g. 1000 pcs), Output 1000.
+
+        Your task is to extract the following fields from the image provided:
+        - supplier_name: The name of the vendor/supplier (who issued the bill). (String)
+        - customer_name: The name of the customer (who received the bill). (String, null if not found)
+        - date: The invoice date in YYYY-MM-DD format. (String)
+        - total: The total amount as a FLOAT following the above rules. (Float)
+        - invoice_number: The invoice number. (String)
+        - items: A list of line items. Each item serves as a purchase item.
+        - description: Product name or description.
+        - quantity: Quantity purchased (default to 1 if not specified).
+        - rate: Unit price/rate as a FLOAT following the above rules. (Float)
+        - amount: Total amount for the line item. (Float)
+
+        Return ONLY a valid JSON object.
+        Detect the language automatically (English, Hindi, or Hinglish).
+        
+        CRITICAL MATH & LOGIC RULES:
+        1. TRUST EXPLICIT INPUTS: If the image clearly shows "1000 * 77", then Quantity=1000 and Rate=77.
+        2. IGNORE AMBIGUOUS TOTALS: If 1000 * 77 = 77,000, but the total is written as "770=00" or "770", YOU MUST RECORD THE AMOUNT AS 77,000.
+        3. DO NOT DOWNGRADE RATE: Never change a clear integer rate (like 77) to a decimal (like 0.77) just to match a written total.
+        4. Notation "770=00" usually means 770.00, BUT in this specific handwritten context, if the math implies 77,000, treat it as 77,000.
+        5. PRIORITY ORDER: (Quantity * Rate) > Written Total.
+        """
+
+        client = get_client()
+        if not client:
+            raise HTTPException(status_code=500, detail="AI service not configured. Check server logs.")
+
+        # Use the deployment name from environment variables, defaulting to "gpt-4o"
+        deployment_name = os.getenv("DEPLOYMENT_NAME_GPT52") or os.getenv("DEPLOYMENT_NAME_GPT4O") or "gpt-4o"
+
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extract data from this invoice."},
+                    {"type": "image_url", "image_url": {"url": f"data:{file.content_type};base64,{encoded_image}"}}
+                ]}
+            ],
+            max_completion_tokens=4096,
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+
+        content = response.choices[0].message.content
+        # The model might wrap JSON in markdown, so clean it up
+        cleaned_content = content.replace("```json", "").replace("```", "").strip()
+        data = json.loads(cleaned_content)
+
+        # Add the attachment URL to the response
+        data['attachment_url'] = attachment_url
+
+        return data
+
+    except Exception as e:
+        logger.error(f"Error parsing invoice: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI Processing Failed: {str(e)}")

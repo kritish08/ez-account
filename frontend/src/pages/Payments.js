@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getPayments, getCustomers, createPayment, deletePayment, formatCurrency, formatDate } from "../lib/api";
+import { getPayments, getCustomers, getCustomer, createPayment, deletePayment, getInvoice, getCreditNotes, formatCurrency, formatDate } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
@@ -14,6 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "../components/ui/dialog";
+import { Checkbox } from "../components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -56,6 +57,7 @@ import { UIFilters } from "../components/UIFilters";
 const Payments = () => {
   const [searchParams] = useSearchParams();
   const preselectedCustomer = searchParams.get("customer");
+  const preselectedInvoice = searchParams.get("invoice");
 
   const [payments, setPayments] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -67,13 +69,22 @@ const Payments = () => {
   const [search, setSearch] = useState("");
   const [modeFilter, setModeFilter] = useState("all");
   const [dateRange, setDateRange] = useState(undefined);
+  const [customerCreditNotes, setCustomerCreditNotes] = useState([]); // CNs for selected customer
+  const [applyCN, setApplyCN] = useState(false);  // whether to apply a CN
+  const [selectedCNId, setSelectedCNId] = useState("");  // which CN to apply
+  
+  const [customerAdvancePayments, setCustomerAdvancePayments] = useState([]); // Advances for selected customer
+  const [applyAdvance, setApplyAdvance] = useState(false);  // whether to apply an advance
+  const [selectedAdvanceId, setSelectedAdvanceId] = useState("");  // which advance to apply
 
   const [formData, setFormData] = useState({
     customer_id: preselectedCustomer || "",
+    invoice_id: preselectedInvoice || "",
     amount: "",
     mode: "cash",
     date: new Date().toISOString().split("T")[0],
     notes: "",
+    use_credit: false,
   });
 
   useEffect(() => {
@@ -98,6 +109,54 @@ const Payments = () => {
       setLoading(false);
     }
   };
+
+  // Fetch credit notes and advance payments when customer changes
+  useEffect(() => {
+    if (formData.customer_id) {
+      Promise.all([
+        getCreditNotes(),
+        getCustomer(formData.customer_id)
+      ]).then(([cnRes, custRes]) => {
+          const cns = (cnRes.data || []).filter(
+            cn => cn.customer_id === formData.customer_id && cn.total > 0
+          );
+          setCustomerCreditNotes(cns);
+          setApplyCN(false);
+          setSelectedCNId("");
+          
+          const advs = custRes.data?.advance_payments || [];
+          setCustomerAdvancePayments(advs);
+          setApplyAdvance(false);
+          setSelectedAdvanceId("");
+      }).catch(err => {
+          setCustomerCreditNotes([]);
+          setCustomerAdvancePayments([]);
+      });
+    } else {
+      setCustomerCreditNotes([]);
+      setCustomerAdvancePayments([]);
+    }
+  }, [formData.customer_id]);
+
+  useEffect(() => {
+    if (preselectedInvoice) {
+      const fetchInv = async () => {
+        try {
+          const res = await getInvoice(preselectedInvoice);
+          const inv = res.data;
+          const due = inv.total - (inv.paid_amount || 0);
+          setFormData(prev => ({
+            ...prev,
+            amount: due > 0 ? due.toString() : "",
+            notes: `Payment for Invoice ${inv.invoice_number}`
+          }));
+        } catch (e) {
+          console.error("Failed to fetch invoice", e);
+        }
+      };
+      fetchInv();
+    }
+  }, [preselectedInvoice]);
 
   const handleDeleteClick = (payment) => {
     setPaymentToDelete(payment);
@@ -126,32 +185,52 @@ const Payments = () => {
       return;
     }
 
-    if (!formData.amount || parseFloat(formData.amount) <= 0) {
-      toast.error("Please enter a valid amount");
+    if ((!formData.amount || parseFloat(formData.amount) <= 0) && !applyCN && !applyAdvance) {
+      toast.error("Please enter a valid amount or apply credit/advance");
       return;
     }
 
     setSaving(true);
     try {
-      const response = await createPayment({
+      const payload = {
         ...formData,
-        amount: parseFloat(formData.amount),
-      });
+        amount: parseFloat(formData.amount) || 0,
+        credit_note_id: (applyCN && selectedCNId) ? selectedCNId : null,
+        advance_payment_id: (applyAdvance && selectedAdvanceId) ? selectedAdvanceId : null,
+      };
+      const response = await createPayment(payload);
 
       let message = "Payment recorded successfully!";
+      if (response.data.credit_note_applied > 0) {
+        message += ` Credit Note of ${formatCurrency(response.data.credit_note_applied)} applied.`;
+      }
+      if (response.data.advance_payment_applied > 0) {
+        message += ` Advance Credit of ${formatCurrency(response.data.advance_payment_applied)} applied.`;
+      }
       if (response.data.excess_as_credit > 0) {
-        message += ` ${formatCurrency(response.data.excess_as_credit)} added as customer credit.`;
+        message += ` ${formatCurrency(response.data.excess_as_credit)} added as Credit Note.`;
+      }
+      if (response.data.excess_as_advance > 0) {
+        message += ` ${formatCurrency(response.data.excess_as_advance)} added as Advance Credit.`;
       }
       toast.success(message);
 
       setDialogOpen(false);
       setFormData({
         customer_id: "",
+        invoice_id: "",
         amount: "",
         mode: "cash",
         date: new Date().toISOString().split("T")[0],
         notes: "",
+        use_credit: false,
       });
+      setApplyCN(false);
+      setSelectedCNId("");
+      setCustomerCreditNotes([]);
+      setApplyAdvance(false);
+      setSelectedAdvanceId("");
+      setCustomerAdvancePayments([]);
       fetchData();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to record payment");
@@ -215,6 +294,74 @@ const Payments = () => {
                   </p>
                 )}
               </div>
+
+              {/* Credit Notes — apply existing CN to this payment */}
+              {customerCreditNotes.length > 0 && formData.invoice_id && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="apply_cn"
+                      checked={applyCN}
+                      onCheckedChange={(checked) => {
+                        setApplyCN(checked);
+                        if (!checked) setSelectedCNId("");
+                        else if (customerCreditNotes.length === 1) setSelectedCNId(customerCreditNotes[0].id);
+                      }}
+                    />
+                    <Label htmlFor="apply_cn" className="cursor-pointer font-medium text-emerald-700">
+                      Apply Credit Note balance
+                    </Label>
+                  </div>
+                  {applyCN && (
+                    <Select value={selectedCNId} onValueChange={setSelectedCNId}>
+                      <SelectTrigger className="bg-white">
+                        <SelectValue placeholder="Select credit note" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {customerCreditNotes.map(cn => (
+                          <SelectItem key={cn.id} value={cn.id}>
+                            CN #{cn.credit_note_number} — {formatCurrency(cn.total)} available
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              )}
+
+              {/* Advance Payments — apply existing advance to this payment */}
+              {customerAdvancePayments.length > 0 && formData.invoice_id && (
+                <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="apply_advance"
+                      checked={applyAdvance}
+                      onCheckedChange={(checked) => {
+                        setApplyAdvance(checked);
+                        if (!checked) setSelectedAdvanceId("");
+                        else if (customerAdvancePayments.length === 1) setSelectedAdvanceId(customerAdvancePayments[0].id);
+                      }}
+                    />
+                    <Label htmlFor="apply_advance" className="cursor-pointer font-medium text-purple-700">
+                      Apply Advance Balance
+                    </Label>
+                  </div>
+                  {applyAdvance && (
+                    <Select value={selectedAdvanceId} onValueChange={setSelectedAdvanceId}>
+                      <SelectTrigger className="bg-white">
+                        <SelectValue placeholder="Select advance credit" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {customerAdvancePayments.map(adv => (
+                          <SelectItem key={adv.id} value={adv.id}>
+                            Advance from Payment ...{adv.payment_id.slice(-8)} — {formatCurrency(adv.remaining_amount)} available
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label htmlFor="amount">Amount *</Label>

@@ -5,11 +5,13 @@ import {
   getCreditReport,
   getSalesReport,
   getExpensesReport,
-  getCashBankReport,
   getInventoryReport,
+  getInventoryByTypeReport,
   getProfitLossReport,
   getTrialBalanceReport,
   getBalanceSheetReport,
+  getBatchTraceabilityReport,
+  getProductionYieldReport,
   exportReport,
   formatCurrency,
   formatDate,
@@ -87,8 +89,17 @@ const Reports = () => {
         case "inventory":
           response = await getInventoryReport();
           break;
+        case "inventory-type":
+          response = await getInventoryByTypeReport();
+          break;
         case "profit-loss":
           response = await getProfitLossReport(dateRange.start, dateRange.end);
+          break;
+        case "batch-traceability":
+          response = await getBatchTraceabilityReport();
+          break;
+        case "production-yield":
+          response = await getProductionYieldReport();
           break;
         case "trial-balance":
           response = await getTrialBalanceReport();
@@ -161,6 +172,9 @@ const Reports = () => {
               <SelectItem value="credit">Customer Credit</SelectItem>
               <SelectItem value="cash-bank">Cash & Bank</SelectItem>
               <SelectItem value="inventory">Inventory Valuation</SelectItem>
+              <SelectItem value="inventory-type">Inventory By Type</SelectItem>
+              <SelectItem value="batch-traceability">Batch Traceability</SelectItem>
+              <SelectItem value="production-yield">Production Yield</SelectItem>
               <SelectItem value="balance-sheet">Balance Sheet</SelectItem>
               <SelectItem value="trial-balance">Trial Balance</SelectItem>
             </SelectContent>
@@ -197,6 +211,18 @@ const Reports = () => {
             <TabsTrigger value="inventory" data-testid="tab-inventory" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
               <Package className="h-4 w-4 mr-2" />
               Inventory
+            </TabsTrigger>
+            <TabsTrigger value="inventory-type" data-testid="tab-inventory-type" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+              <Package className="h-4 w-4 mr-2" />
+              Inv by Type
+            </TabsTrigger>
+            <TabsTrigger value="batch-traceability" data-testid="tab-batch" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+              <Package className="h-4 w-4 mr-2" />
+              Batch Trac.
+            </TabsTrigger>
+            <TabsTrigger value="production-yield" data-testid="tab-yield" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
+              <Building2 className="h-4 w-4 mr-2" />
+              Prod. Yield
             </TabsTrigger>
             <TabsTrigger value="balance-sheet" data-testid="tab-balance-sheet" className="data-[state=active]:bg-brand-600 data-[state=active]:text-white">
               <FileText className="h-4 w-4 mr-2" />
@@ -685,6 +711,168 @@ const Reports = () => {
                   </Table>
                 ) : (
                   <EmptyState message="No inventory items found" />
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* Inventory By Type Report */}
+        <TabsContent value="inventory-type" className="mt-4">
+          {loading ? (
+            <ReportSkeleton />
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <Card>
+                  <CardContent className="p-4">
+                    <p className="text-sm text-slate-500">Products/Items</p>
+                    <p className="text-2xl font-bold font-mono text-slate-900">
+                      {data?.details?.length || 0}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="p-4">
+                    <p className="text-sm text-slate-500">Total Stock Items</p>
+                    <p className="text-2xl font-bold font-mono text-emerald-600">
+                      {Object.values(data?.summary || {}).reduce((acc, curr) => acc + curr.total_stock, 0)}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="p-4">
+                    <p className="text-sm text-slate-500">Total Value</p>
+                    <p className="text-2xl font-bold font-mono text-brand-600">
+                      {formatCurrency(data?.total_value || 0)}
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Summary by Item Type</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {data?.summary && Object.keys(data.summary).length > 0 ? (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Item Type</TableHead>
+                          <TableHead className="text-right">Product Count</TableHead>
+                          <TableHead className="text-right">Total Stock</TableHead>
+                          <TableHead className="text-right">Total Value</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {Object.entries(data.summary).map(([type, summary]) => (
+                          <TableRow key={type}>
+                            <TableCell>
+                              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 text-slate-800">
+                                {type.replace("_", " ")}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right">{summary.count}</TableCell>
+                            <TableCell className="text-right font-mono">{summary.total_stock}</TableCell>
+                            <TableCell className="text-right font-mono text-brand-600">
+                              {formatCurrency(summary.total_value)}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  ) : (
+                    <EmptyState message="No inventory data" />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Batch Traceability */}
+        <TabsContent value="batch-traceability" className="mt-4">
+          {loading ? (
+            <ReportSkeleton />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Batch Traceability & Expiry</CardTitle>
+                <CardDescription>Monitor active batches, current stock levels, and precise expiration dates</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {data?.report?.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Product</TableHead>
+                        <TableHead>Batch Number</TableHead>
+                        <TableHead>Expiry Date</TableHead>
+                        <TableHead className="text-right">Current Stock</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.report.map((row, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell className="font-medium text-slate-900">{row.product_name}</TableCell>
+                          <TableCell className="font-mono text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-700 w-fit">{row.batch_number}</TableCell>
+                          <TableCell className={row.expiry_date && new Date(row.expiry_date) < new Date() ? "text-rose-600 font-medium" : "text-slate-500"}>
+                            {row.expiry_date ? formatDate(row.expiry_date) : "-"}
+                          </TableCell>
+                          <TableCell className="text-right font-mono font-medium text-brand-600">{row.current_stock}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <EmptyState message="No active batches found" />
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* Production Yield */}
+        <TabsContent value="production-yield" className="mt-4">
+          {loading ? (
+            <ReportSkeleton />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Production Yield & COGS</CardTitle>
+                <CardDescription>Track the cost efficiency and yield of finished goods against consumed raw materials</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {data?.report?.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Order</TableHead>
+                        <TableHead>Product Produced</TableHead>
+                        <TableHead className="text-right">Qty</TableHead>
+                        <TableHead className="text-right">Raw Materials Cost</TableHead>
+                        <TableHead className="text-right">FG Standard Value</TableHead>
+                        <TableHead className="text-right">Yield Variance</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.report.map((row, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell className="font-mono text-xs">{row.order_number}</TableCell>
+                          <TableCell className="font-medium">{row.product_name}</TableCell>
+                          <TableCell className="text-right font-mono">{row.qty_produced}</TableCell>
+                          <TableCell className="text-right font-mono text-rose-600">{formatCurrency(row.materials_cost)}</TableCell>
+                          <TableCell className="text-right font-mono text-emerald-600">{formatCurrency(row.fg_value)}</TableCell>
+                          <TableCell className={`text-right font-mono font-bold ${row.yield_variance >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                            {row.yield_variance > 0 ? "+" : ""}{formatCurrency(row.yield_variance)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <EmptyState message="No completed production orders found" />
                 )}
               </CardContent>
             </Card>

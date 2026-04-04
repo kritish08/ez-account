@@ -1,9 +1,21 @@
 import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { getDashboard, formatCurrency, formatDate } from "../lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { useModules } from "../context/ModulesContext";
+import { getDashboard, formatCurrency, formatDate, resetSystem } from "../lib/api";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import {
   Banknote,
   Building2,
@@ -17,6 +29,7 @@ import {
   AlertTriangle,
   Receipt,
   Package,
+  Trash2,
 } from "lucide-react";
 
 const StatCard = ({ icon: Icon, label, value, subValue, color }) => (
@@ -39,6 +52,7 @@ const StatCard = ({ icon: Icon, label, value, subValue, color }) => (
 );
 
 const Dashboard = () => {
+  const { modules } = useModules();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -60,15 +74,74 @@ const Dashboard = () => {
   if (loading) {
     return (
       <div className="space-y-8 animate-fade-in">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {[...Array(6)].map((_, i) => (
+        {/* Quick Actions Skeleton */}
+        <div className="flex flex-wrap gap-3">
+          <Skeleton className="h-10 w-32" />
+          <Skeleton className="h-10 w-36" />
+          <Skeleton className="h-10 w-32" />
+        </div>
+
+        {/* Stats Grid Skeleton */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {[...Array(9)].map((_, i) => (
             <Card key={i}>
               <CardContent className="p-6">
-                <Skeleton className="h-4 w-24 mb-2" />
-                <Skeleton className="h-8 w-32" />
+                <div className="flex items-start justify-between">
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-8 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                  </div>
+                  <Skeleton className="h-10 w-10 rounded-lg" />
+                </div>
               </CardContent>
             </Card>
           ))}
+        </div>
+
+        {/* Recent Activity Skeleton */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Recent Invoices Skeleton */}
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-6 w-32" />
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Skeleton className="h-10 w-10 rounded" />
+                    <div className="space-y-2">
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                  </div>
+                  <Skeleton className="h-4 w-20" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          {/* Recent Payments Skeleton */}
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-6 w-32" />
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <Skeleton className="h-10 w-10 rounded" />
+                    <div className="space-y-2">
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                  </div>
+                  <Skeleton className="h-4 w-20" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
         </div>
       </div>
     );
@@ -102,13 +175,13 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         <StatCard
           icon={TrendingUp}
-          label="Today's Sales"
+          label="Today's Billed Revenue"
           value={formatCurrency(data?.today_sales)}
           color="text-emerald-600"
         />
         <StatCard
           icon={Calendar}
-          label="Monthly Sales"
+          label="Monthly Billed Revenue"
           value={formatCurrency(data?.monthly_sales)}
           subValue="This month"
           color="text-brand-600"
@@ -161,6 +234,36 @@ const Dashboard = () => {
           color={data?.low_stock_count > 0 ? "text-amber-600" : "text-emerald-600"}
         />
       </div>
+
+      {/* Manufacturing Floor Area */}
+      {modules?.enable_production && (
+        <div className="animate-fade-in mt-8 mb-6">
+          <h2 className="text-xl font-bold font-heading text-slate-900 mb-4">Manufacturing Floor</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 border-l-4 border-brand-500 pl-4 py-2 bg-slate-50/50 rounded-r-xl">
+            <StatCard
+              icon={Building2}
+              label="Active Operations"
+              value={data?.active_work_orders || 0}
+              subValue="Orders currently IN_PROGRESS"
+              color="text-brand-600"
+            />
+            <StatCard
+              icon={AlertTriangle}
+              label="Pending QC"
+              value={data?.completed_work_orders || 0}
+              subValue="Completed this month"
+              color="text-amber-600"
+            />
+            <StatCard
+              icon={Calendar}
+              label="Planned Queue"
+              value={data?.planned_work_orders || 0}
+              subValue="Waiting for raw materials/start"
+              color="text-indigo-600"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Recent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -249,6 +352,150 @@ const Dashboard = () => {
           </CardContent>
         </Card>
       </div>
+      {/* Recent Activity Round 2: Purchases & Expenses */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        {/* Recent Purchases */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-lg font-semibold">Recent Purchases</CardTitle>
+            <Link to="/purchases">
+              <Button variant="ghost" size="sm">
+                View all <ArrowRight className="h-4 w-4 ml-1" />
+              </Button>
+            </Link>
+          </CardHeader>
+          <CardContent>
+            {data?.recent_purchases?.length > 0 ? (
+              <div className="space-y-3">
+                {data.recent_purchases.map((purchase) => (
+                  <Link
+                    key={purchase.id}
+                    to={`/purchases?id=${purchase.id}`}
+                    className="flex items-center justify-between p-3 rounded-lg hover:bg-slate-50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-slate-100 rounded-lg">
+                        <Package className="h-4 w-4 text-slate-600" />
+                      </div>
+                      <div>
+                        <p className="font-medium text-sm text-slate-900">{purchase.supplier_name || 'Cash Purchase'}</p>
+                        <p className="text-xs text-slate-500">{formatDate(purchase.date)}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-mono text-sm font-medium">{formatCurrency(purchase.total)}</p>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${purchase.payment_status === 'paid' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                        {purchase.payment_status}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500 text-center py-8">No purchases yet</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Recent Expenses */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-lg font-semibold">Recent Expenses</CardTitle>
+            <Link to="/expenses">
+              <Button variant="ghost" size="sm">
+                View all <ArrowRight className="h-4 w-4 ml-1" />
+              </Button>
+            </Link>
+          </CardHeader>
+          <CardContent>
+            {data?.recent_expenses?.length > 0 ? (
+              <div className="space-y-3">
+                {data.recent_expenses.map((expense) => (
+                  <div
+                    key={expense.id}
+                    className="flex items-center justify-between p-3 rounded-lg hover:bg-slate-50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-rose-50 rounded-lg">
+                        <Receipt className="h-4 w-4 text-rose-600" />
+                      </div>
+                      <div>
+                        <p className="font-medium text-sm text-slate-900">{expense.description}</p>
+                        <p className="text-xs text-slate-500">{formatDate(expense.date)} • {expense.category || 'Other'}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-mono text-sm font-medium text-rose-600">
+                        -{formatCurrency(expense.amount)}
+                      </p>
+                      <span className="text-xs text-slate-500 capitalize">{expense.mode}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500 text-center py-8">No expenses yet</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* IMS Alerts (Optional) */}
+      {modules?.enable_advanced_ims && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+          <Card className="border-amber-200 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-2 bg-amber-50/50 rounded-t-xl border-b border-amber-100">
+              <CardTitle className="text-lg font-semibold text-amber-900 flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-amber-600" />
+                Low Stock Alerts
+              </CardTitle>
+              <Link to="/products">
+                <Button variant="ghost" size="sm" className="text-amber-700 hover:text-amber-800 hover:bg-amber-100">
+                  View inventory <ArrowRight className="h-4 w-4 ml-1" />
+                </Button>
+              </Link>
+            </CardHeader>
+            <CardContent className="pt-4">
+              {data?.low_stock_products?.length > 0 ? (
+                <div className="space-y-3">
+                  {data.low_stock_products.map((product) => (
+                    <Link
+                      key={product.id}
+                      to={`/products/${product.id}`}
+                      className="flex items-center justify-between p-3 rounded-lg hover:bg-amber-50 transition-colors border border-transparent hover:border-amber-100"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 bg-amber-100 rounded-lg">
+                          <Package className="h-4 w-4 text-amber-700" />
+                        </div>
+                        <div>
+                          <p className="font-medium text-sm text-slate-900">{product.name}</p>
+                          <p className="text-xs text-amber-600 font-medium">
+                            Stock: {product.current_stock} (Min: {product.low_stock_threshold})
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-xs font-bold px-2 py-1 rounded-full bg-rose-100 text-rose-700">
+                          Reorder
+                        </span>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-8 text-center bg-slate-50/50 rounded-lg border border-slate-100 border-dashed">
+                  <div className="h-10 w-10 bg-emerald-100 rounded-full flex items-center justify-center mb-3">
+                    <Package className="h-5 w-5 text-emerald-600" />
+                  </div>
+                  <p className="text-sm font-medium text-slate-900">Inventory looks healthy</p>
+                  <p className="text-xs text-slate-500 mt-1">No products are currently running low on stock.</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { useModules } from "../context/ModulesContext";
 import { getProducts, createProduct, updateProduct, deleteProduct, formatCurrency } from "../lib/api";
+import BarcodeScanner from "../components/BarcodeScanner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -10,7 +13,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "../components/ui/dialog";
 import {
   Table,
@@ -41,9 +43,11 @@ import {
 import { Skeleton } from "../components/ui/skeleton";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Plus, Search, Package, Loader2, MoreHorizontal, Pencil, Trash2, AlertTriangle } from "lucide-react";
+import { Plus, Search, Package, Loader2, MoreHorizontal, Pencil, Trash2, AlertTriangle, ScanLine, Layers, Hash } from "lucide-react";
 
 const Products = () => {
+  const navigate = useNavigate();
+  const { modules } = useModules();
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -52,6 +56,7 @@ const Products = () => {
   const [editingProduct, setEditingProduct] = useState(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [productToDelete, setProductToDelete] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     sku: "",
@@ -61,20 +66,18 @@ const Products = () => {
     low_stock_threshold: "10",
   });
 
-  useEffect(() => {
-    fetchProducts();
-  }, []);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = () => setRefreshKey((k) => k + 1);
 
-  const fetchProducts = async () => {
-    try {
-      const response = await getProducts();
-      setProducts(response.data);
-    } catch (error) {
-      toast.error("Failed to load products");
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getProducts()
+      .then((res) => { if (!cancelled) setProducts(res.data); })
+      .catch(() => toast.error("Failed to load products"))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
 
   const resetForm = () => {
     setFormData({
@@ -88,17 +91,27 @@ const Products = () => {
     setEditingProduct(null);
   };
 
+  const handleScan = (decodedText) => {
+    setScannerOpen(false);
+    try {
+      const parts = decodedText.split('|');
+      if (parts[0] === 'EZ') {
+        const prdPart = parts.find(p => p.startsWith("PRD:"));
+        if (prdPart) {
+          const productId = prdPart.replace("PRD:", "");
+          navigate(`/products/${productId}`);
+          return;
+        }
+      }
+      // Fallback: search by serial/sku text
+      setSearch(decodedText);
+    } catch (err) {
+      toast.error("Invalid QR code scanned");
+    }
+  };
+
   const handleEdit = (product) => {
-    setEditingProduct(product);
-    setFormData({
-      name: product.name,
-      sku: product.sku || "",
-      selling_price: product.selling_price.toString(),
-      cost_price: product.cost_price.toString(),
-      opening_stock: "0",
-      low_stock_threshold: product.low_stock_threshold.toString(),
-    });
-    setDialogOpen(true);
+    navigate(`/products/${product.id}`);
   };
 
   const handleSubmit = async (e) => {
@@ -133,9 +146,10 @@ const Products = () => {
 
       setDialogOpen(false);
       resetForm();
-      fetchProducts();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to save product");
+      refresh();
     } finally {
       setSaving(false);
     }
@@ -153,16 +167,18 @@ const Products = () => {
   };
 
   const confirmDelete = async () => {
-    if (!productToDelete) return;
+    // Optimistic delete
+    setProducts((prev) => prev.filter((p) => p.id !== productToDelete.id));
+    setDeleteDialogOpen(false);
+    const deleted = productToDelete;
+    setProductToDelete(null);
     try {
-      await deleteProduct(productToDelete.id);
+      await deleteProduct(deleted.id);
       toast.success("Product deleted successfully");
-      fetchProducts();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to delete product");
-    } finally {
-      setDeleteDialogOpen(false);
-      setProductToDelete(null);
+      refresh();
     }
   };
 
@@ -175,12 +191,6 @@ const Products = () => {
         </div>
 
         <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-          <DialogTrigger asChild>
-            <Button className="bg-brand-600 hover:bg-brand-700" data-testid="add-product-btn">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Product
-            </Button>
-          </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>{editingProduct ? "Edit Product" : "Add New Product"}</DialogTitle>
@@ -286,6 +296,19 @@ const Products = () => {
             </form>
           </DialogContent>
         </Dialog>
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <Button className="bg-brand-600 hover:bg-brand-700" onClick={() => { resetForm(); setDialogOpen(true); }} data-testid="add-product-btn">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Product
+          </Button>
+          {modules?.enable_advanced_ims && (
+            <Button variant="outline" onClick={() => setScannerOpen(true)}>
+              <ScanLine className="h-4 w-4 mr-2" />
+              Scan to Find
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Search */}
@@ -349,7 +372,15 @@ const Products = () => {
                         <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center">
                           <Package className="h-4 w-4 text-brand-600" />
                         </div>
-                        <span className="font-medium text-slate-900">{product.name}</span>
+                        <div>
+                          <span className="font-medium text-slate-900">{product.name}</span>
+                          {modules?.enable_advanced_ims && (
+                            <div className="flex gap-1 mt-0.5">
+                              {product.track_batches && <Badge variant="secondary" className="text-xs px-1 py-0 h-4"><Layers className="h-2.5 w-2.5 mr-0.5" />Batches</Badge>}
+                              {product.track_serials && <Badge variant="secondary" className="text-xs px-1 py-0 h-4"><Hash className="h-2.5 w-2.5 mr-0.5" />Serials</Badge>}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell className="text-slate-500">{product.sku || "-"}</TableCell>
@@ -374,11 +405,11 @@ const Products = () => {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => handleEdit(product)}>
+                          <DropdownMenuItem onSelect={() => handleEdit(product)}>
                             <Pencil className="mr-2 h-4 w-4" /> Edit
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => handleDeleteClick(product)} className="text-red-600 focus:text-red-600">
+                          <DropdownMenuItem onSelect={() => handleDeleteClick(product)} className="text-red-600 focus:text-red-600">
                             <Trash2 className="mr-2 h-4 w-4" /> Delete
                           </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -396,12 +427,14 @@ const Products = () => {
             <Package className="h-12 w-12 text-slate-300 mb-4" />
             <h3 className="text-lg font-medium text-slate-900 mb-1">No products yet</h3>
             <p className="text-slate-500 text-sm mb-4">Add your first product to get started</p>
-            <Button onClick={() => setDialogOpen(true)} className="bg-brand-600 hover:bg-brand-700">
+            <Button onClick={() => { resetForm(); setDialogOpen(true); }} className="bg-brand-600 hover:bg-brand-700">
               <Plus className="h-4 w-4 mr-2" />Add Product
             </Button>
           </CardContent>
         </Card>
       )}
+
+      <BarcodeScanner open={scannerOpen} onScan={handleScan} onClose={() => setScannerOpen(false)} />
     </div>
   );
 };
