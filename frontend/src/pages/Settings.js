@@ -36,6 +36,7 @@ import {
   AlertTriangle,
   Database,
   Lock,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { Switch } from "../components/ui/switch";
 import { getSystemSettings, updateSystemSettings } from "../lib/api";
@@ -207,7 +208,7 @@ const Settings = () => {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Settings className="h-5 w-5 text-brand-600" />
+            <SettingsIcon className="h-5 w-5 text-brand-600" />
             System Configuration
           </CardTitle>
           <CardDescription>Manage global APPLICATION settings</CardDescription>

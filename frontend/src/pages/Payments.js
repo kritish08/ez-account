@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getPayments, getCustomers, createPayment, formatCurrency, formatDate } from "../lib/api";
+import { getPayments, getCustomers, createPayment, deletePayment, formatCurrency, formatDate } from "../lib/api";
 import { Button } from "../components/ui/button";
+import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -28,9 +29,29 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import { Skeleton } from "../components/ui/skeleton";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
+import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Plus, CreditCard, Loader2, Banknote, Building2 } from "lucide-react";
+import { Plus, CreditCard, Loader2, Banknote, Building2, MoreHorizontal, Trash2 } from "lucide-react";
+import { PageHeader } from "../components/PageHeader";
+import { UIFilters } from "../components/UIFilters";
 
 const Payments = () => {
   const [searchParams] = useSearchParams();
@@ -41,6 +62,12 @@ const Payments = () => {
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(!!preselectedCustomer);
   const [saving, setSaving] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [paymentToDelete, setPaymentToDelete] = useState(null);
+  const [search, setSearch] = useState("");
+  const [modeFilter, setModeFilter] = useState("all");
+  const [dateRange, setDateRange] = useState(undefined);
+
   const [formData, setFormData] = useState({
     customer_id: preselectedCustomer || "",
     amount: "",
@@ -51,12 +78,16 @@ const Payments = () => {
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [dateRange]); // Added dateRange dep
 
   const fetchData = async () => {
     try {
+      setLoading(true);
+      const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+      const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+
       const [paymentsRes, customersRes] = await Promise.all([
-        getPayments(),
+        getPayments(startDate, endDate),
         getCustomers(),
       ]);
       setPayments(paymentsRes.data);
@@ -68,14 +99,33 @@ const Payments = () => {
     }
   };
 
+  const handleDeleteClick = (payment) => {
+    setPaymentToDelete(payment);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!paymentToDelete) return;
+    try {
+      await deletePayment(paymentToDelete.id);
+      toast.success("Payment deleted (voided) successfully");
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to delete payment");
+    } finally {
+      setDeleteDialogOpen(false);
+      setPaymentToDelete(null);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     if (!formData.customer_id) {
       toast.error("Please select a customer");
       return;
     }
-    
+
     if (!formData.amount || parseFloat(formData.amount) <= 0) {
       toast.error("Please enter a valid amount");
       return;
@@ -87,13 +137,13 @@ const Payments = () => {
         ...formData,
         amount: parseFloat(formData.amount),
       });
-      
+
       let message = "Payment recorded successfully!";
       if (response.data.excess_as_credit > 0) {
         message += ` ${formatCurrency(response.data.excess_as_credit)} added as customer credit.`;
       }
       toast.success(message);
-      
+
       setDialogOpen(false);
       setFormData({
         customer_id: "",
@@ -114,19 +164,19 @@ const Payments = () => {
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="payments-page">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold font-heading text-slate-900">Payments</h1>
-          <p className="text-slate-500 mt-1">Record and track customer payments</p>
-        </div>
-
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button className="bg-brand-600 hover:bg-brand-700" data-testid="record-payment-btn">
+      <div className="space-y-6 animate-fade-in" data-testid="payments-page">
+        <PageHeader
+          title="Payments"
+          description="Record and track customer payments"
+          action={
+            <Button onClick={() => setDialogOpen(true)} className="bg-brand-600 hover:bg-brand-700" data-testid="record-payment-btn">
               <Plus className="h-4 w-4 mr-2" />
               Record Payment
             </Button>
-          </DialogTrigger>
+          }
+        />
+
+        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>Record Payment</DialogTitle>
@@ -192,11 +242,10 @@ const Payments = () => {
                   <button
                     type="button"
                     onClick={() => setFormData((prev) => ({ ...prev, mode: "cash" }))}
-                    className={`flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-all ${
-                      formData.mode === "cash"
-                        ? "border-brand-600 bg-brand-50 text-brand-700"
-                        : "border-slate-200 hover:border-slate-300"
-                    }`}
+                    className={`flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-all ${formData.mode === "cash"
+                      ? "border-brand-600 bg-brand-50 text-brand-700"
+                      : "border-slate-200 hover:border-slate-300"
+                      }`}
                     data-testid="payment-mode-cash"
                   >
                     <Banknote className="h-4 w-4" />
@@ -205,11 +254,10 @@ const Payments = () => {
                   <button
                     type="button"
                     onClick={() => setFormData((prev) => ({ ...prev, mode: "bank" }))}
-                    className={`flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-all ${
-                      formData.mode === "bank"
-                        ? "border-brand-600 bg-brand-50 text-brand-700"
-                        : "border-slate-200 hover:border-slate-300"
-                    }`}
+                    className={`flex items-center justify-center gap-2 p-3 rounded-lg border-2 transition-all ${formData.mode === "bank"
+                      ? "border-brand-600 bg-brand-50 text-brand-700"
+                      : "border-slate-200 hover:border-slate-300"
+                      }`}
                     data-testid="payment-mode-bank"
                   >
                     <Building2 className="h-4 w-4" />
@@ -273,6 +321,46 @@ const Payments = () => {
         </Dialog>
       </div>
 
+      {/* Delete Alert Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete (void) the payment of {paymentToDelete && formatCurrency(paymentToDelete.amount)} for {paymentToDelete?.customer_name}.
+              This action cannot be undone and will reverse the ledger entries.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Search & Filter */}
+      <UIFilters
+        search={search}
+        setSearch={setSearch}
+        searchPlaceholder="Search payments..."
+        statusFilter={modeFilter}
+        setStatusFilter={setModeFilter}
+        statusLabel="All Modes"
+        statusOptions={[
+          { value: "cash", label: "Cash" },
+          { value: "bank", label: "Bank" }
+        ]}
+        dateRange={dateRange}
+        setDateRange={setDateRange}
+        onClear={() => {
+          setSearch("");
+          setModeFilter("all");
+          setDateRange(undefined);
+        }}
+      />
+
       {/* Payments Table */}
       {loading ? (
         <Card>
@@ -284,60 +372,91 @@ const Payments = () => {
             </div>
           </CardContent>
         </Card>
-      ) : payments.length > 0 ? (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Customer</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Mode</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead>Notes</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {payments.map((payment) => (
-                  <TableRow key={payment.id} data-testid={`payment-row-${payment.id}`}>
-                    <TableCell className="font-medium">{payment.customer_name}</TableCell>
-                    <TableCell className="text-slate-500">{formatDate(payment.date)}</TableCell>
-                    <TableCell>
-                      <span className="inline-flex items-center gap-1 text-sm capitalize">
-                        {payment.mode === "cash" ? (
-                          <Banknote className="h-3 w-3 text-emerald-600" />
-                        ) : (
-                          <Building2 className="h-3 w-3 text-blue-600" />
-                        )}
-                        {payment.mode}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right font-mono font-medium text-emerald-600">
-                      +{formatCurrency(payment.amount)}
-                    </TableCell>
-                    <TableCell className="text-slate-500 text-sm">{payment.notes || "-"}</TableCell>
+      ) : (() => {
+        const filtered = payments.filter((p) => {
+          const q = search.toLowerCase();
+          const matchSearch = !q || p.customer_name?.toLowerCase().includes(q) || p.notes?.toLowerCase().includes(q);
+          const matchMode = modeFilter === "all" || p.mode === modeFilter;
+          return matchSearch && matchMode;
+        });
+        return filtered.length > 0 ? (
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Mode</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead>Notes</TableHead>
+                    <TableHead className="w-[80px]"></TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <CreditCard className="h-12 w-12 text-slate-300 mb-4" />
-            <h3 className="text-lg font-medium text-slate-900 mb-1">No payments yet</h3>
-            <p className="text-slate-500 text-sm mb-4">Record your first payment to get started</p>
-            <Button
-              onClick={() => setDialogOpen(true)}
-              className="bg-brand-600 hover:bg-brand-700"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              Record Payment
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+                </TableHeader>
+                <TableBody>
+                  {filtered.map((payment) => (
+                    <TableRow key={payment.id} data-testid={`payment-row-${payment.id}`}>
+                      <TableCell className="font-medium">{payment.customer_name}</TableCell>
+                      <TableCell className="text-slate-500">{formatDate(payment.date)}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="font-normal gap-1">
+                          {payment.mode === "cash" ? (
+                            <Banknote className="h-3 w-3 text-emerald-600" />
+                          ) : (
+                            <Building2 className="h-3 w-3 text-blue-600" />
+                          )}
+                          <span className="capitalize">{payment.mode}</span>
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right font-mono font-medium text-emerald-600">
+                        +{formatCurrency(payment.amount)}
+                      </TableCell>
+                      <TableCell className="text-slate-500 text-sm">{payment.notes || "-"}</TableCell>
+                      <TableCell>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" className="h-8 w-8 p-0" data-testid={`payment-actions-${payment.id}`}>
+                              <span className="sr-only">Open menu</span>
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={() => handleDeleteClick(payment)}
+                              className="text-red-600 focus:text-red-600"
+                              data-testid={`delete-payment-${payment.id}`}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete (Void)
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center py-12">
+              <CreditCard className="h-12 w-12 text-slate-300 mb-4" />
+              <h3 className="text-lg font-medium text-slate-900 mb-1">No payments found</h3>
+              <p className="text-slate-500 text-sm mb-4">{search || modeFilter !== 'all' ? 'Try adjusting your search or filters' : 'Record your first payment to get started'}</p>
+              <Button
+                onClick={() => setDialogOpen(true)}
+                className="bg-brand-600 hover:bg-brand-700"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Record Payment
+              </Button>
+            </CardContent>
+          </Card>
+        );
+      })()}
     </div>
   );
 };

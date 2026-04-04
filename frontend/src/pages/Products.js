@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { getProducts, createProduct, updateProduct, formatCurrency } from "../lib/api";
+import { getProducts, createProduct, updateProduct, deleteProduct, formatCurrency } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -20,10 +20,28 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Plus, Search, Package, Loader2, Edit, AlertTriangle } from "lucide-react";
+import { Plus, Search, Package, Loader2, MoreHorizontal, Pencil, Trash2, AlertTriangle } from "lucide-react";
 
 const Products = () => {
   const [products, setProducts] = useState([]);
@@ -32,6 +50,8 @@ const Products = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [productToDelete, setProductToDelete] = useState(null);
   const [formData, setFormData] = useState({
     name: "",
     sku: "",
@@ -110,7 +130,7 @@ const Products = () => {
         await createProduct(payload);
         toast.success("Product added successfully");
       }
-      
+
       setDialogOpen(false);
       resetForm();
       fetchProducts();
@@ -126,6 +146,25 @@ const Products = () => {
       p.name.toLowerCase().includes(search.toLowerCase()) ||
       p.sku?.toLowerCase().includes(search.toLowerCase())
   );
+
+  const handleDeleteClick = (product) => {
+    setProductToDelete(product);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!productToDelete) return;
+    try {
+      await deleteProduct(productToDelete.id);
+      toast.success("Product deleted successfully");
+      fetchProducts();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to delete product");
+    } finally {
+      setDeleteDialogOpen(false);
+      setProductToDelete(null);
+    }
+  };
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="products-page">
@@ -261,6 +300,22 @@ const Products = () => {
         />
       </div>
 
+      {/* Delete Alert Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Product?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete "{productToDelete?.name}". Products used in invoices or purchases cannot be deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Products Table */}
       {loading ? (
         <Card><CardContent className="p-6"><div className="space-y-4">{[...Array(5)].map((_, i) => (<Skeleton key={i} className="h-12 w-full" />))}</div></CardContent></Card>
@@ -280,7 +335,15 @@ const Products = () => {
               </TableHeader>
               <TableBody>
                 {filteredProducts.map((product) => (
-                  <TableRow key={product.id} data-testid={`product-row-${product.id}`}>
+                  <TableRow
+                    key={product.id}
+                    className="cursor-pointer hover:bg-slate-50"
+                    onClick={(e) => {
+                      if (e.target.closest('button')) return;
+                      handleEdit(product);
+                    }}
+                    data-testid={`product-row-${product.id}`}
+                  >
                     <TableCell>
                       <div className="flex items-center gap-3">
                         <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center">
@@ -303,9 +366,23 @@ const Products = () => {
                     <TableCell className="text-right font-mono text-slate-500">{formatCurrency(product.cost_price)}</TableCell>
                     <TableCell className="text-right font-mono font-medium">{formatCurrency(product.selling_price)}</TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="sm" onClick={() => handleEdit(product)}>
-                        <Edit className="h-4 w-4" />
-                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-8 w-8 p-0">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                          <DropdownMenuItem onClick={() => handleEdit(product)}>
+                            <Pencil className="mr-2 h-4 w-4" /> Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleDeleteClick(product)} className="text-red-600 focus:text-red-600">
+                            <Trash2 className="mr-2 h-4 w-4" /> Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 ))}

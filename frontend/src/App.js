@@ -19,6 +19,8 @@ import Reports from "./pages/Reports";
 import Products from "./pages/Products";
 import Suppliers from "./pages/Suppliers";
 import Purchases from "./pages/Purchases";
+import CreditNotes from "./pages/CreditNotes";
+import DebitNotes from "./pages/DebitNotes";
 import Settings from "./pages/Settings";
 import Layout from "./components/Layout";
 
@@ -27,7 +29,7 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 
 const ProtectedRoute = ({ children }) => {
   const { token, loading } = useAuth();
-  
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -35,11 +37,11 @@ const ProtectedRoute = ({ children }) => {
       </div>
     );
   }
-  
+
   if (!token) {
     return <Navigate to="/login" replace />;
   }
-  
+
   return children;
 };
 
@@ -48,7 +50,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
-      
+
       <Route path="/" element={
         <ProtectedRoute>
           <Layout />
@@ -67,6 +69,8 @@ function AppRoutes() {
         <Route path="invoices/:id/edit" element={<EditInvoice />} />
         <Route path="payments" element={<Payments />} />
         <Route path="expenses" element={<Expenses />} />
+        <Route path="credit-notes" element={<CreditNotes />} />
+        <Route path="debit-notes" element={<DebitNotes />} />
         <Route path="reports" element={<Reports />} />
         <Route path="settings" element={<Settings />} />
       </Route>
