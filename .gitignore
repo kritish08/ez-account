@@ -76,6 +76,9 @@ agenthub/agents/youtube/db
 # Build caches
 .cache/
 
+# Claude Code worktrees
+.worktrees/
+
 # Mobile development
 android-sdk/ -e 
 # Environment files
