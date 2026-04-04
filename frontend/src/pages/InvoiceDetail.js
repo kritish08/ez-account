@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { getInvoice, deleteInvoice, downloadInvoicePDF, formatCurrency, formatDate } from "../lib/api";
+import { useModules } from "../context/ModulesContext";
+import { getInvoice, deleteInvoice, downloadInvoicePDF, formatCurrency, formatDate, publishInvoice, getCustomerLedger } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import {
@@ -13,6 +14,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
+import { Checkbox } from "../components/ui/checkbox";
+import { Label } from "../components/ui/label";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
 import {
@@ -22,6 +25,7 @@ import {
   FileText,
   Loader2,
   Trash2,
+  Send,
 } from "lucide-react";
 
 const statusBadgeClass = {
@@ -34,10 +38,16 @@ const statusBadgeClass = {
 const InvoiceDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { modules } = useModules();
   const [invoice, setInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [applyCredit, setApplyCredit] = useState(false);
+  const [customerBalance, setCustomerBalance] = useState(0);
 
   useEffect(() => {
     fetchInvoice();
@@ -72,6 +82,32 @@ const InvoiceDetail = () => {
       toast.error("Failed to download PDF");
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handlePublishClick = async () => {
+    // Check for customer credit
+    try {
+      const res = await getCustomerLedger(invoice.customer_id);
+      setCustomerBalance(res.data.current_balance);
+      setApplyCredit(false);
+    } catch (e) {
+      console.error("Failed to fetch ledger", e);
+    }
+    setPublishDialogOpen(true);
+  };
+
+  const handleConfirmPublish = async () => {
+    setPublishing(true);
+    try {
+      await publishInvoice(id, applyCredit);
+      toast.success("Invoice published successfully");
+      fetchInvoice();
+    } catch (error) {
+      toast.error("Failed to publish invoice");
+    } finally {
+      setPublishing(false);
+      setPublishDialogOpen(false);
     }
   };
 
@@ -116,13 +152,26 @@ const InvoiceDetail = () => {
 
         <div className="flex gap-2">
           {invoice.status !== "paid" && (
-            <Link to={`/payments?customer=${invoice.customer_id}`}>
+            <Link to={`/payments?customer=${invoice.customer_id}&invoice=${id}`}>
               <Button variant="outline" data-testid="record-payment-for-invoice-btn">
                 <CreditCard className="h-4 w-4 mr-2" />
                 Record Payment
               </Button>
             </Link>
+
           )}
+
+          {invoice.status === 'draft' && (
+            <Button
+              onClick={handlePublishClick}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              data-testid="publish-invoice-btn"
+            >
+              <Send className="h-4 w-4 mr-2" />
+              Publish
+            </Button>
+          )}
+
           <Link to={`/invoices/${id}/edit`}>
             <Button variant="outline" data-testid="edit-invoice-btn">
               <FileText className="h-4 w-4 mr-2" />
@@ -142,6 +191,14 @@ const InvoiceDetail = () => {
             )}
             Download PDF
           </Button>
+          {invoice.attachment_url && (
+            <a href={`http://localhost:8000/api${invoice.attachment_url}`} target="_blank" rel="noopener noreferrer">
+              <Button variant="outline">
+                <FileText className="h-4 w-4 mr-2" />
+                View Bill
+              </Button>
+            </a>
+          )}
           <Button
             variant="outline"
             className="text-red-600 border-red-200 hover:bg-red-50"
@@ -177,6 +234,45 @@ const InvoiceDetail = () => {
               }}
               className="bg-red-600 hover:bg-red-700"
             >Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Publish Alert Dialog */}
+      <AlertDialog open={publishDialogOpen} onOpenChange={setPublishDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Publish Invoice?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will finalize the invoice, generate a unique invoice number, and update stock and ledgers.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {customerBalance < 0 && (
+            <div className="flex items-center space-x-2 py-4">
+              <Checkbox
+                id="apply_credit_publish"
+                checked={applyCredit}
+                onCheckedChange={setApplyCredit}
+              />
+              <Label htmlFor="apply_credit_publish" className="cursor-pointer">
+                Apply available credit of {formatCurrency(Math.abs(customerBalance))}
+              </Label>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={publishing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                handleConfirmPublish();
+              }}
+              className="bg-emerald-600 hover:bg-emerald-700"
+              disabled={publishing}
+            >
+              {publishing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : "Publish Invoice"}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -224,7 +320,19 @@ const InvoiceDetail = () => {
               <tbody>
                 {invoice.items.map((item, index) => (
                   <tr key={index} className="border-b border-slate-100">
-                    <td className="py-4 text-slate-900">{item.description}</td>
+                    <td className="py-4 text-slate-900">
+                      <div>
+                        <span>{item.description}</span>
+                        {modules?.enable_advanced_ims && (item.batch_id || (item.serial_numbers && item.serial_numbers.length > 0)) && (
+                          <div className="text-xs text-slate-400 mt-0.5 space-y-0.5">
+                            {item.batch_id && <span className="block">Batch: <span className="font-mono text-brand-600">{item.batch_id}</span></span>}
+                            {item.serial_numbers && item.serial_numbers.length > 0 && (
+                              <span className="block">Serials: <span className="font-mono text-emerald-600">{item.serial_numbers.join(", ")}</span></span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </td>
                     <td className="py-4 text-right font-mono text-slate-600">{item.quantity}</td>
                     <td className="py-4 text-right font-mono text-slate-600">
                       {formatCurrency(item.rate)}
@@ -272,16 +380,28 @@ const InvoiceDetail = () => {
             </div>
           </div>
 
-          {/* Notes */}
           {invoice.notes && (
             <div className="mt-8 pt-6 border-t border-slate-200">
               <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2">Notes</p>
               <p className="text-sm text-slate-600">{invoice.notes}</p>
             </div>
           )}
+
+          {invoice.attachment_url && (
+            <div className="mt-8 pt-6 border-t border-slate-200">
+              <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-4">Attached Bill</p>
+              <div className="rounded-lg overflow-hidden border border-slate-200">
+                <img
+                  src={`http://localhost:8000/api${invoice.attachment_url}`}
+                  alt="Attached Bill"
+                  className="w-full max-h-[600px] object-contain bg-slate-50"
+                />
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
-    </div>
+    </div >
   );
 };
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import {
-    getDebitNotes, createDebitNote, deleteDebitNote,
+    getDebitNotes, createDebitNote, updateDebitNote, deleteDebitNote,
     getSuppliers, getProducts, formatCurrency, formatDate
 } from "../lib/api";
 import { Button } from "../components/ui/button";
@@ -40,6 +41,7 @@ const DebitNotes = () => {
     const [noteToDelete, setNoteToDelete] = useState(null);
     const [search, setSearch] = useState("");
     const [dateRange, setDateRange] = useState(undefined);
+    const [editingId, setEditingId] = useState(null);
 
     const [formData, setFormData] = useState({
         supplier_id: "",
@@ -48,28 +50,26 @@ const DebitNotes = () => {
         items: [{ product_id: "", quantity: 1, cost_price: 0 }],
     });
 
+    const [refreshKey, setRefreshKey] = useState(0);
+    const refresh = () => setRefreshKey((k) => k + 1);
+
     useEffect(() => {
-        fetchAll();
-    }, [dateRange]);
-
-    const fetchAll = async () => {
-        try {
-            setLoading(true);
-            const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
-            const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
-
-            const [notesRes, suppRes, prodRes] = await Promise.all([
-                getDebitNotes(startDate, endDate), getSuppliers(), getProducts()
-            ]);
-            setNotes(notesRes.data);
-            setSuppliers(suppRes.data);
-            setProducts(prodRes.data);
-        } catch (error) {
-            toast.error("Failed to load data");
-        } finally {
-            setLoading(false);
-        }
-    };
+        let cancelled = false;
+        setLoading(true);
+        const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+        const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+        Promise.all([getDebitNotes(startDate, endDate), getSuppliers(), getProducts()])
+            .then(([notesRes, suppRes, prodRes]) => {
+                if (!cancelled) {
+                    setNotes(notesRes.data);
+                    setSuppliers(suppRes.data);
+                    setProducts(prodRes.data);
+                }
+            })
+            .catch(() => toast.error("Failed to load data"))
+            .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
+    }, [refreshKey, dateRange]);
 
     const resetForm = () => {
         setFormData({
@@ -78,6 +78,7 @@ const DebitNotes = () => {
             date: new Date().toISOString().split("T")[0],
             items: [{ product_id: "", quantity: 1, cost_price: 0 }],
         });
+        setEditingId(null);
     };
 
     const addItem = () => {
@@ -122,17 +123,34 @@ const DebitNotes = () => {
         setDeleteDialogOpen(true);
     };
 
+    const handleEditClick = (note) => {
+        setEditingId(note.id);
+        setFormData({
+            supplier_id: note.supplier_id,
+            reason: note.reason || "",
+            date: note.date,
+            items: note.items.map(i => ({
+                product_id: i.product_id,
+                quantity: i.quantity,
+                cost_price: i.cost_price
+            }))
+        });
+        setDialogOpen(true);
+    };
+
     const confirmDelete = async () => {
-        if (!noteToDelete) return;
+        // Optimistic delete
+        setNotes((prev) => prev.filter((n) => n.id !== noteToDelete.id));
+        setDeleteDialogOpen(false);
+        const deleted = noteToDelete;
+        setNoteToDelete(null);
         try {
-            await deleteDebitNote(noteToDelete.id);
+            await deleteDebitNote(deleted.id);
             toast.success("Debit Note deleted & effects reversed");
-            fetchAll();
+            refresh();
         } catch (error) {
             toast.error(error.response?.data?.detail || "Failed to delete");
-        } finally {
-            setDeleteDialogOpen(false);
-            setNoteToDelete(null);
+            refresh();
         }
     };
 
@@ -144,7 +162,7 @@ const DebitNotes = () => {
         }
         setSaving(true);
         try {
-            await createDebitNote({
+            const payload = {
                 supplier_id: formData.supplier_id,
                 items: formData.items.map((i) => ({
                     product_id: i.product_id,
@@ -153,13 +171,22 @@ const DebitNotes = () => {
                 })),
                 reason: formData.reason || null,
                 date: formData.date,
-            });
-            toast.success("Debit Note created!");
+            };
+
+            if (editingId) {
+                await updateDebitNote(editingId, payload);
+                toast.success("Debit Note updated!");
+            } else {
+                await createDebitNote(payload);
+                toast.success("Debit Note created!");
+            }
+
             setDialogOpen(false);
             resetForm();
-            fetchAll();
+            refresh();
         } catch (error) {
-            toast.error(error.response?.data?.detail || "Failed to create Debit Note");
+            toast.error(error.response?.data?.detail || "Failed to save Debit Note");
+            refresh();
         } finally {
             setSaving(false);
         }
@@ -180,13 +207,21 @@ const DebitNotes = () => {
             <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
                 <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
                     <DialogHeader>
-                        <DialogTitle>Create Debit Note</DialogTitle>
+                        <DialogTitle>{editingId ? "Edit Debit Note" : "Create Debit Note"}</DialogTitle>
                         <DialogDescription>Return goods to a supplier to reduce your payable</DialogDescription>
                     </DialogHeader>
                     <form onSubmit={handleSubmit} className="space-y-4 mt-4">
                         <div className="space-y-2">
                             <Label>Supplier *</Label>
                             <Select value={formData.supplier_id} onValueChange={(v) => setFormData((p) => ({ ...p, supplier_id: v }))}>
+                                <SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger>
+                                <SelectContent>
+                                    {suppliers.map((s) => (
+                                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <Select value={formData.supplier_id} onValueChange={(v) => setFormData((p) => ({ ...p, supplier_id: v }))} disabled={!!editingId}>
                                 <SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger>
                                 <SelectContent>
                                     {suppliers.map((s) => (
@@ -251,7 +286,7 @@ const DebitNotes = () => {
                         <div className="flex justify-end gap-3 pt-4">
                             <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
                             <Button type="submit" className="bg-brand-600 hover:bg-brand-700" disabled={saving}>
-                                {saving ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Creating...</>) : "Create Debit Note"}
+                                {saving ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</>) : (editingId ? "Update Debit Note" : "Create Debit Note")}
                             </Button>
                         </div>
                     </form>
@@ -314,7 +349,11 @@ const DebitNotes = () => {
                                     <TableBody>
                                         {filtered.map((note) => (
                                             <TableRow key={note.id}>
-                                                <TableCell className="font-medium font-mono">{note.debit_note_number}</TableCell>
+                                                <TableCell className="font-medium font-mono">
+                                                    <Link to={`/debit-notes/${note.id}`} className="text-brand-600 hover:underline">
+                                                        {note.debit_note_number}
+                                                    </Link>
+                                                </TableCell>
                                                 <TableCell>{note.supplier_name}</TableCell>
                                                 <TableCell className="text-slate-500">{formatDate(note.date)}</TableCell>
                                                 <TableCell className="text-slate-500 max-w-[200px] truncate">{note.reason || "—"}</TableCell>
@@ -327,7 +366,10 @@ const DebitNotes = () => {
                                                         <DropdownMenuContent align="end">
                                                             <DropdownMenuLabel>Actions</DropdownMenuLabel>
                                                             <DropdownMenuSeparator />
-                                                            <DropdownMenuItem onClick={() => handleDeleteClick(note)} className="text-red-600 focus:text-red-600">
+                                                            <DropdownMenuItem onSelect={() => handleEditClick(note)}>
+                                                                Edit
+                                                            </DropdownMenuItem>
+                                                            <DropdownMenuItem onSelect={() => handleDeleteClick(note)} className="text-red-600 focus:text-red-600">
                                                                 <Trash2 className="mr-2 h-4 w-4" /> Delete
                                                             </DropdownMenuItem>
                                                         </DropdownMenuContent>

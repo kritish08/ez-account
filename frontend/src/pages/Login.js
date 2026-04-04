@@ -14,15 +14,8 @@ const Login = () => {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
-
-  React.useEffect(() => {
-    getAuthConfig().then(res => {
-      setRegistrationEnabled(res.data.registration_enabled);
-    }).catch(() => { });
-  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -122,15 +115,6 @@ const Login = () => {
               )}
             </Button>
           </form>
-
-          {registrationEnabled && (
-            <p className="text-center text-sm text-slate-500 mt-6">
-              Don't have an account?{" "}
-              <Link to="/register" className="text-brand-600 hover:text-brand-700 font-medium">
-                Create account
-              </Link>
-            </p>
-          )}
         </div>
       </div>
     </div>

@@ -68,25 +68,21 @@ const Invoices = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [invoiceToDelete, setInvoiceToDelete] = useState(null);
 
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = () => setRefreshKey((k) => k + 1);
+
   useEffect(() => {
-    fetchInvoices();
-  }, [statusFilter, dateRange]);
-
-  const fetchInvoices = async () => {
-    try {
-      setLoading(true);
-      const status = statusFilter === "all" ? null : statusFilter;
-      const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
-      const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
-
-      const response = await getInvoices(status, startDate, endDate);
-      setInvoices(response.data);
-    } catch (error) {
-      toast.error("Failed to load invoices");
-    } finally {
-      setLoading(false);
-    }
-  };
+    let cancelled = false;
+    setLoading(true);
+    const status = statusFilter === "all" ? null : statusFilter;
+    const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+    const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+    getInvoices(status, startDate, endDate)
+      .then((res) => { if (!cancelled) setInvoices(res.data); })
+      .catch(() => toast.error("Failed to load invoices"))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey, statusFilter, dateRange]);
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="invoices-page">
@@ -116,15 +112,18 @@ const Invoices = () => {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={async () => {
+                // Optimistic delete
+                setInvoices((prev) => prev.filter((inv) => inv.id !== invoiceToDelete.id));
+                setDeleteDialogOpen(false);
+                const deleted = invoiceToDelete;
+                setInvoiceToDelete(null);
                 try {
-                  await deleteInvoice(invoiceToDelete.id);
+                  await deleteInvoice(deleted.id);
                   toast.success("Invoice deleted & effects reversed");
-                  fetchInvoices();
+                  refresh();
                 } catch (error) {
                   toast.error(error.response?.data?.detail || "Failed to delete invoice");
-                } finally {
-                  setDeleteDialogOpen(false);
-                  setInvoiceToDelete(null);
+                  refresh();
                 }
               }}
               className="bg-red-600 hover:bg-red-700"
@@ -224,12 +223,12 @@ const Invoices = () => {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => navigate(`/invoices/${invoice.id}`)}>
+                          <DropdownMenuItem onSelect={() => navigate(`/invoices/${invoice.id}`)}>
                             <Eye className="mr-2 h-4 w-4" /> View
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            onClick={() => { setInvoiceToDelete(invoice); setDeleteDialogOpen(true); }}
+                            onSelect={() => { setInvoiceToDelete(invoice); setDeleteDialogOpen(true); }}
                             className="text-red-600 focus:text-red-600"
                           >
                             <Trash2 className="mr-2 h-4 w-4" /> Delete

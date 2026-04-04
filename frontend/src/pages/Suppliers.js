@@ -10,7 +10,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "../components/ui/dialog";
 import {
   Table,
@@ -67,20 +66,18 @@ const Suppliers = () => {
     notes: "",
   });
 
-  useEffect(() => {
-    fetchSuppliers();
-  }, []);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = () => setRefreshKey((k) => k + 1);
 
-  const fetchSuppliers = async () => {
-    try {
-      const response = await getSuppliers();
-      setSuppliers(response.data);
-    } catch (error) {
-      toast.error("Failed to load suppliers");
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getSuppliers()
+      .then((res) => { if (!cancelled) setSuppliers(res.data); })
+      .catch(() => toast.error("Failed to load suppliers"))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
 
   const resetForm = () => {
     setFormData({ name: "", phone: "", address: "", gstin: "", opening_balance: "" });
@@ -105,16 +102,18 @@ const Suppliers = () => {
   };
 
   const confirmDelete = async () => {
-    if (!supplierToDelete) return;
+    // Optimistic delete
+    setSuppliers((prev) => prev.filter((s) => s.id !== supplierToDelete.id));
+    setDeleteDialogOpen(false);
+    const deleted = supplierToDelete;
+    setSupplierToDelete(null);
     try {
-      await deleteSupplier(supplierToDelete.id);
+      await deleteSupplier(deleted.id);
       toast.success("Supplier deleted successfully");
-      fetchSuppliers();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to delete supplier");
-    } finally {
-      setDeleteDialogOpen(false);
-      setSupplierToDelete(null);
+      refresh();
     }
   };
 
@@ -139,9 +138,10 @@ const Suppliers = () => {
       }
       setDialogOpen(false);
       resetForm();
-      fetchSuppliers();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to save supplier");
+      refresh();
     } finally {
       setSaving(false);
     }
@@ -166,7 +166,7 @@ const Suppliers = () => {
       setPaymentDialogOpen(false);
       setPaymentData({ amount: "", mode: "cash", notes: "" });
       setSelectedSupplier(null);
-      fetchSuppliers();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to record payment");
     } finally {
@@ -179,9 +179,9 @@ const Suppliers = () => {
     setPaymentDialogOpen(true);
   };
 
-  const filteredSuppliers = suppliers.filter(
-    (s) => s.name.toLowerCase().includes(search.toLowerCase()) || s.phone?.includes(search)
-  );
+  const filteredSuppliers = suppliers
+    .filter((s) => s.name.toLowerCase().includes(search.toLowerCase()) || s.phone?.includes(search))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="suppliers-page">
@@ -195,12 +195,6 @@ const Suppliers = () => {
           setDialogOpen(open);
           if (!open) resetForm();
         }}>
-          <DialogTrigger asChild>
-            <Button className="bg-brand-600 hover:bg-brand-700" data-testid="add-supplier-btn">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Supplier
-            </Button>
-          </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>{editingSupplier ? "Edit Supplier" : "Add New Supplier"}</DialogTitle>
@@ -243,6 +237,11 @@ const Suppliers = () => {
             </form>
           </DialogContent>
         </Dialog>
+
+        <Button className="bg-brand-600 hover:bg-brand-700" onClick={() => { resetForm(); setDialogOpen(true); }} data-testid="add-supplier-btn">
+          <Plus className="h-4 w-4 mr-2" />
+          Add Supplier
+        </Button>
       </div>
 
       {/* Delete Alert Dialog */}
@@ -378,13 +377,13 @@ const Suppliers = () => {
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => handleEdit(supplier)} data-testid={`edit-supplier-${supplier.id}`}>
+                          <DropdownMenuItem onSelect={() => handleEdit(supplier)} data-testid={`edit-supplier-${supplier.id}`}>
                             <Pencil className="mr-2 h-4 w-4" />
                             Edit
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            onClick={() => handleDeleteClick(supplier)}
+                            onSelect={() => handleDeleteClick(supplier)}
                             className="text-red-600 focus:text-red-600"
                             data-testid={`delete-supplier-${supplier.id}`}
                           >
@@ -406,7 +405,7 @@ const Suppliers = () => {
             <Truck className="h-12 w-12 text-slate-300 mb-4" />
             <h3 className="text-lg font-medium text-slate-900 mb-1">No suppliers yet</h3>
             <p className="text-slate-500 text-sm mb-4">Add your first supplier to get started</p>
-            <Button onClick={() => setDialogOpen(true)} className="bg-brand-600 hover:bg-brand-700"><Plus className="h-4 w-4 mr-2" />Add Supplier</Button>
+            <Button onClick={() => { resetForm(); setDialogOpen(true); }} className="bg-brand-600 hover:bg-brand-700"><Plus className="h-4 w-4 mr-2" />Add Supplier</Button>
           </CardContent>
         </Card>
       )}

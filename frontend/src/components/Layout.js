@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { useModules } from "../context/ModulesContext";
 import { Button } from "./ui/button";
 import {
   LayoutDashboard,
@@ -14,18 +15,22 @@ import {
   Menu,
   X,
   Package,
+  Layers,
   Truck,
   ShoppingCart,
   RotateCcw,
   Undo2,
+  Factory,
 } from "lucide-react";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/customers", icon: Users, label: "Customers" },
-  { to: "/products", icon: Package, label: "Products" },
+  { to: "/finished-goods", icon: Package, label: "Finished Goods" },
   { to: "/suppliers", icon: Truck, label: "Suppliers" },
+  { to: "/raw-materials", icon: Layers, label: "Raw Materials", requireModule: "enable_production" },
   { to: "/purchases", icon: ShoppingCart, label: "Purchases" },
+  { to: "/production", icon: Factory, label: "Production", requireModule: "enable_production" },
   { to: "/invoices", icon: FileText, label: "Invoices" },
   { to: "/payments", icon: CreditCard, label: "Payments" },
   { to: "/expenses", icon: Receipt, label: "Expenses" },
@@ -36,8 +41,16 @@ const navItems = [
 
 const Layout = () => {
   const { user, logout } = useAuth();
+  const { modules } = useModules();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const filteredNavItems = navItems.filter((item) => {
+    if (item.to === "/credit-notes" && modules?.enable_credit_notes === false) return false;
+    if (item.to === "/debit-notes" && modules?.enable_debit_notes === false) return false;
+    if (item.requireModule && !modules?.[item.requireModule]) return false;
+    return true;
+  });
 
   const handleLogout = () => {
     logout();
@@ -73,7 +86,7 @@ const Layout = () => {
 
           {/* Navigation */}
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-            {navItems.map((item) => (
+            {filteredNavItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

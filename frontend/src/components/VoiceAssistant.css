@@ -1,0 +1,383 @@
+/* Voice Assistant - Matches App Theme (brand-600 blue, slate accents) */
+
+/* Floating Mic Button */
+.voice-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: hsl(var(--primary));
+  /* brand-600 blue */
+  color: white;
+  border: none;
+  box-shadow: 0 4px 16px rgba(66, 99, 235, 0.3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 1000;
+}
+
+.voice-fab:hover {
+  transform: scale(1.05);
+  box-shadow: 0 8px 24px rgba(66, 99, 235, 0.4);
+}
+
+.voice-fab.open {
+  background: #64748b;
+  /* slate-500 */
+}
+
+.voice-fab.recording {
+  background: #ef4444;
+  /* red-500 */
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 4px 16px rgba(239, 68, 68, 0.4);
+  }
+
+  50% {
+    box-shadow: 0 4px 32px rgba(239, 68, 68, 0.8);
+  }
+}
+
+.voice-fab .status-dot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 12px;
+  height: 12px;
+  background: #10b981;
+  /* emerald-500 */
+  border-radius: 50%;
+  border: 2px solid white;
+}
+
+/* Voice Panel - Professional Design */
+.voice-panel {
+  position: fixed;
+  bottom: 100px;
+  right: 24px;
+  width: 400px;
+  max-height: 600px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.15);
+  border: 1px solid #e2e8f0;
+  /* slate-200 */
+  display: flex;
+  flex-direction: column;
+  z-index: 999;
+  animation: slideUp 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Header - Matches App Style */
+.voice-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #f8fafc;
+  /* slate-50 */
+}
+
+.voice-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #0f172a;
+  /* slate-900 */
+}
+
+.status-badge {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-badge.connected {
+  background: #d1fae5;
+  /* emerald-100 */
+  color: #065f46;
+  /* emerald-800 */
+}
+
+.status-badge.disconnected {
+  background: #fef3c7;
+  /* amber-100 */
+  color: #92400e;
+  /* amber-800 */
+}
+
+/* Draft Card - Clean Design */
+.draft-card {
+  margin: 16px;
+  padding: 14px;
+  background: #f1f5f9;
+  /* slate-100 */
+  border: 1px solid #cbd5e1;
+  /* slate-300 */
+  border-radius: 8px;
+}
+
+.draft-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.draft-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  /* slate-700 */
+}
+
+.draft-badge {
+  font-size: 10px;
+  background: hsl(var(--primary));
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.draft-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.draft-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #475569;
+  /* slate-600 */
+}
+
+.draft-row strong {
+  color: #0f172a;
+  /* slate-900 */
+}
+
+/* Conversation - Clean Messages */
+.conversation {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  background: white;
+  min-height: 200px;
+  max-height: 320px;
+}
+
+.msg {
+  margin-bottom: 14px;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.msg-user .msg-bubble {
+  background: hsl(var(--primary));
+  /* brand-600 */
+  color: white;
+  margin-left: auto;
+  max-width: 75%;
+  padding: 10px 14px;
+  border-radius: 14px 14px 2px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.msg-assistant .msg-bubble {
+  background: #f1f5f9;
+  /* slate-100 */
+  border: 1px solid #e2e8f0;
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 14px 14px 14px 2px;
+  font-size: 14px;
+  color: #0f172a;
+  line-height: 1.5;
+}
+
+.msg-error .msg-bubble {
+  background: #fef2f2;
+  /* red-50 */
+  border: 1px solid #fecaca;
+  /* red-200 */
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  color: #991b1b;
+  /* red-800 */
+}
+
+.function-tag {
+  margin-top: 6px;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 2px 8px;
+  border-radius: 8px;
+  display: inline-block;
+  font-weight: 500;
+}
+
+.msg-time {
+  font-size: 10px;
+  color: #94a3b8;
+  /* slate-400 */
+  margin-top: 4px;
+}
+
+.msg-user .msg-time {
+  text-align: right;
+}
+
+/* Voice Control - Push to Talk */
+.voice-control {
+  padding: 20px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  /* slate-50 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.mic-button {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: hsl(var(--primary));
+  color: white;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  position: relative;
+  box-shadow: 0 4px 12px rgba(66, 99, 235, 0.3);
+}
+
+.mic-button:hover:not(:disabled) {
+  transform: scale(1.05);
+  box-shadow: 0 6px 16px rgba(66, 99, 235, 0.4);
+}
+
+.mic-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mic-button.recording {
+  background: #ef4444;
+  /* red-500 */
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+}
+
+.pulse-ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 3px solid #ef4444;
+  animation: pulseRing 1.5s infinite;
+}
+
+@keyframes pulseRing {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+
+/* Audio Bars Visualization */
+.audio-bars {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 40px;
+}
+
+.audio-bars .bar {
+  width: 4px;
+  background: hsl(var(--primary));
+  border-radius: 2px;
+  transition: height 0.1s ease;
+  min-height: 4px;
+}
+
+.mic-hint {
+  font-size: 12px;
+  color: #64748b;
+  /* slate-500 */
+  margin: 0;
+  font-weight: 500;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .voice-panel {
+    width: calc(100% - 48px);
+    right: 24px;
+    left: 24px;
+    bottom: 90px;
+  }
+
+  .voice-fab {
+    bottom: 16px;
+    right: 16px;
+  }
+}
+
+/* Utility Classes */
+.text-brand-600 {
+  color: hsl(var(--primary));
+}

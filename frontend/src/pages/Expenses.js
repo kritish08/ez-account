@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { getExpenses, createExpense, updateExpense, deleteExpense, formatCurrency, formatDate } from "../lib/api";
+import { getExpenses, createExpense, updateExpense, deleteExpense, formatCurrency, formatDate, parseInvoice } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { PageHeader } from "../components/PageHeader";
 import { UIFilters } from "../components/UIFilters";
-import { Plus, Banknote, Building2, MoreHorizontal, Pencil, Trash2, Receipt, Loader2 } from "lucide-react";
+import { Plus, Banknote, Building2, MoreHorizontal, Pencil, Trash2, Receipt, Loader2, ScanLine, Upload } from "lucide-react";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent } from "../components/ui/card";
@@ -70,6 +70,10 @@ const Expenses = () => {
   const [editingExpense, setEditingExpense] = useState(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [expenseToDelete, setExpenseToDelete] = useState(null);
+
+  const [scanning, setScanning] = useState(false);
+  const fileInputRef = React.useRef(null);
+  const fileInputCameraRef = React.useRef(null);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
@@ -81,28 +85,23 @@ const Expenses = () => {
     mode: "cash",
     category: "",
     date: new Date().toISOString().split("T")[0],
+    attachment_url: "",
   });
 
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refresh = () => setRefreshKey((k) => k + 1);
+
   useEffect(() => {
-    fetchExpenses();
-  }, [categoryFilter, modeFilter, dateRange]);
-
-  const fetchExpenses = async () => {
-    try {
-      setLoading(true);
-      const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
-      const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
-
-      // Note: Filtering by category/mode is currently done client-side in the render
-      // But we pass dates to backend
-      const response = await getExpenses(startDate, endDate);
-      setExpenses(response.data);
-    } catch (error) {
-      toast.error("Failed to load expenses");
-    } finally {
-      setLoading(false);
-    }
-  };
+    let cancelled = false;
+    setLoading(true);
+    const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+    const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+    getExpenses(startDate, endDate)
+      .then((res) => { if (!cancelled) setExpenses(res.data); })
+      .catch(() => toast.error("Failed to load expenses"))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey, dateRange, categoryFilter, modeFilter]);
 
   const resetForm = () => {
     setFormData({
@@ -111,8 +110,65 @@ const Expenses = () => {
       mode: "cash",
       category: "",
       date: new Date().toISOString().split("T")[0],
+      attachment_url: "",
     });
     setEditingExpense(null);
+  };
+
+  const handleScanClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleCameraClick = () => {
+    fileInputCameraRef.current?.click();
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      setScanning(true);
+      toast.info("Scanning receipt with AI...", { duration: 3000 });
+
+      const response = await parseInvoice(file);
+      const data = response.data;
+
+      if (data.error) {
+        toast.error(data.error);
+        return;
+      }
+
+      // Auto-fill logic
+      const updates = {};
+
+      if (data.date) updates.date = data.date;
+      if (data.total) updates.amount = data.total;
+      if (data.attachment_url) updates.attachment_url = data.attachment_url;
+
+      let desc = "";
+      const party = data.supplier_name || data.party_name;
+      if (party) desc += party;
+
+      if (data.items && data.items.length > 0) {
+        const itemDesc = data.items.map(i => i.description).join(", ");
+        desc += (desc ? " - " : "") + itemDesc;
+      }
+      if (desc) updates.description = desc.substring(0, 100); // Limit length
+
+      setFormData(prev => ({ ...prev, ...updates }));
+      if (data.attachment_url) toast.info("Receipt image attached");
+      toast.success("Receipt scanned successfully!");
+
+    } catch (error) {
+      console.error(error);
+      toast.error("Failed to parse receipt. Please try manually.");
+    } finally {
+      setScanning(false);
+      // Reset input
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (fileInputCameraRef.current) fileInputCameraRef.current.value = "";
+    }
   };
 
   const handleEdit = (expense) => {
@@ -123,6 +179,7 @@ const Expenses = () => {
       mode: expense.mode,
       category: expense.category || "",
       date: expense.date.split("T")[0],
+      attachment_url: expense.attachment_url || "",
     });
     setDialogOpen(true);
   };
@@ -133,16 +190,18 @@ const Expenses = () => {
   };
 
   const confirmDelete = async () => {
-    if (!expenseToDelete) return;
+    // Optimistic delete
+    setExpenses((prev) => prev.filter((e) => e.id !== expenseToDelete.id));
+    setDeleteDialogOpen(false);
+    const deleted = expenseToDelete;
+    setExpenseToDelete(null);
     try {
-      await deleteExpense(expenseToDelete.id);
+      await deleteExpense(deleted.id);
       toast.success("Expense deleted successfully");
-      fetchExpenses();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to delete expense");
-    } finally {
-      setDeleteDialogOpen(false);
-      setExpenseToDelete(null);
+      refresh();
     }
   };
 
@@ -176,9 +235,10 @@ const Expenses = () => {
       }
       setDialogOpen(false);
       resetForm();
-      fetchExpenses();
+      refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to save expense");
+      refresh();
     } finally {
       setSaving(false);
     }
@@ -203,10 +263,74 @@ const Expenses = () => {
       }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{editingExpense ? "Edit Expense" : "Add Expense"}</DialogTitle>
-            <DialogDescription>{editingExpense ? "Update expense details below" : "Record a new business expense"}</DialogDescription>
+            <DialogTitle>{editingExpense ? "Edit Expense" : "Record Expense"}</DialogTitle>
+            <DialogDescription>Enter the details of the expense.</DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4 mt-4">
+
+          {/* AI Scan Button */}
+          {!editingExpense && (
+            <div className="bg-slate-50 p-4 rounded-lg flex items-center justify-between border border-dashed border-slate-300">
+              <div className="flex items-center gap-3">
+                <div className="bg-brand-100 p-2 rounded-full">
+                  <ScanLine className="h-5 w-5 text-brand-600" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-medium text-slate-900">Auto-fillReceipt</h4>
+                  <p className="text-xs text-slate-500">Scan receipt to auto-fill details.</p>
+                </div>
+              </div>
+              <div>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  className="hidden"
+                  accept="image/*,application/pdf"
+                  onChange={handleFileChange}
+                />
+                <input
+                  type="file"
+                  ref={fileInputCameraRef}
+                  className="hidden"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFileChange}
+                />
+                <div className="flex gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleScanClick}
+                    disabled={scanning}
+                  >
+                    {scanning ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+                    {scanning ? "Scanning..." : "Upload Bill"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCameraClick}
+                    disabled={scanning}
+                    className="hidden md:flex"
+                  >
+                    <ScanLine className="h-4 w-4 mr-2" />
+                    Take Photo
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {formData.attachment_url && (
+            <div className="bg-slate-50 p-3 rounded-lg flex items-center gap-2 border border-slate-200">
+              <Receipt className="h-4 w-4 text-emerald-600" />
+              <span className="text-sm text-slate-700">Receipt attached</span>
+              <a href={`http://localhost:8000${formData.attachment_url}`} target="_blank" rel="noopener noreferrer" className="ml-auto text-sm text-brand-600 hover:underline">
+                View Receipt
+              </a>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="description">Description *</Label>
               <Input
@@ -398,13 +522,15 @@ const Expenses = () => {
             </CardContent>
           </Card>
         ) : (() => {
-          const filtered = expenses.filter((exp) => {
-            const q = search.toLowerCase();
-            const matchSearch = !q || exp.description?.toLowerCase().includes(q) || exp.category?.toLowerCase().includes(q);
-            const matchCategory = categoryFilter === "all" || exp.category === categoryFilter;
-            const matchMode = modeFilter === "all" || exp.mode === modeFilter;
-            return matchSearch && matchCategory && matchMode; // Date filtering is server-side now
-          });
+          const filtered = expenses
+            .filter((exp) => {
+              const q = search.toLowerCase();
+              const matchSearch = !q || exp.description?.toLowerCase().includes(q) || exp.category?.toLowerCase().includes(q);
+              const matchCategory = categoryFilter === "all" || exp.category === categoryFilter;
+              const matchMode = modeFilter === "all" || exp.mode === modeFilter;
+              return matchSearch && matchCategory && matchMode;
+            })
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
           return filtered.length > 0 ? (
             <Card>
               <CardContent className="p-0">
@@ -460,13 +586,13 @@ const Expenses = () => {
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                              <DropdownMenuItem onClick={() => handleEdit(expense)} data-testid={`edit-expense-${expense.id}`}>
+                              <DropdownMenuItem onSelect={() => handleEdit(expense)} data-testid={`edit-expense-${expense.id}`}>
                                 <Pencil className="mr-2 h-4 w-4" />
                                 Edit
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
-                                onClick={() => handleDeleteClick(expense)}
+                                onSelect={() => handleDeleteClick(expense)}
                                 className="text-red-600 focus:text-red-600"
                                 data-testid={`delete-expense-${expense.id}`}
                               >

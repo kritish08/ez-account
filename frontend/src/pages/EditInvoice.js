@@ -40,7 +40,7 @@ const EditInvoice = () => {
     try {
       const [invoiceRes, productsRes] = await Promise.all([
         getInvoice(id),
-        getProducts(),
+        getProducts({ item_type: 'finished_good' }),
       ]);
 
       setInvoice(invoiceRes.data);

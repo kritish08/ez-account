@@ -1,122 +1,237 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, BackgroundTasks
-from fastapi.responses import StreamingResponse, Response
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
-import logging
+import sys
+import shutil
+import uuid
 import json
 import base64
 import secrets
-from pathlib import Path
+import logging
+from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, APIRouter, Header, Query, Request, status, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Union
-import uuid
-from datetime import datetime, timezone, timedelta
-from jose import JWTError, jwt
-import io
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from openpyxl import Workbook
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import csv
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import IndexModel, ASCENDING, DESCENDING
+from jose import jwt, JWTError
+import bcrypt
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from dotenv import load_dotenv
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+# Internal imports
+from services.ai_service import parse_invoice_image
 
-import certifi
+# Load environment variables
+load_dotenv()
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-# Append TLS bypass to connection string for LibreSSL 2.8.3 compatibility
-if '?' not in mongo_url:
-    mongo_url += '?tlsAllowInvalidCertificates=true'
-elif 'tlsAllowInvalidCertificates' not in mongo_url:
-    mongo_url += '&tlsAllowInvalidCertificates=true'
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# JWT Config
-SECRET_KEY = os.environ.get('JWT_SECRET', 'ez-accounts-secret-key-change-in-production')
+# Configuration
+MONGO_URL = os.getenv("MONGO_URL")
+DB_NAME = os.getenv("DB_NAME", "BlitzerDB")
+SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+MASTER_ENCRYPTION_KEY = os.getenv("MASTER_ENCRYPTION_KEY")
 
-# Master Encryption Key for backups
-MASTER_ENCRYPTION_KEY = os.environ.get('MASTER_ENCRYPTION_KEY', '')
-
-# Password hashing
-security = HTTPBearer()
-
-app = FastAPI(title="EZ Accounts by Kyrex API", version="2.0.0")
-api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============== PYDANTIC MODELS ==============
+# Database Setup
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
+# Lifecycle
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Server starting up...")
+    
+    # Create compound indexes for production queries
+    try:
+        await db.ledger.create_index([("account", ASCENDING), ("date", DESCENDING)])
+        await db.stock_movements.create_index([("product_id", ASCENDING), ("date", DESCENDING)])
+        await db.invoices.create_index([("customer_id", ASCENDING), ("status", ASCENDING), ("date", DESCENDING)])
+        await db.production_orders.create_index([("status", ASCENDING), ("product_id", ASCENDING)])
+        logger.info("MongoDB indexes verified/created.")
+    except Exception as e:
+        logger.warning(f"Failed to create indexes: {e}")
+        
+    yield
+    logger.info("Server shutting down...")
+    client.close()
+
+app = FastAPI(title="EZ Accounts by Kyrex API", version="2.0.0", lifespan=lifespan)
+
+# CORS
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Auth Scheme
+security = HTTPBearer()
+
+# Static Files
+uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(uploads_dir, exist_ok=True)
+app.mount("/api/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+api_router = APIRouter(prefix="/api")
+
+# ... existing code ...
+
+class ProductCreate(BaseModel):
     name: str
+    description: Optional[str] = None
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    hsn: Optional[str] = None
+    unit: str = "pcs"
+    category: Optional[str] = None
+    item_type: str = "FINISHED_GOOD"  # RAW_MATERIAL | SEMI_FINISHED | FINISHED_GOOD | CONSUMABLE | SERVICE
+    selling_price: float
+    cost_price: float = 0
+    stock_quantity: float = 0
+    opening_stock: float = 0
+    low_stock_threshold: float = 10
+    reorder_point: float = 0
+    track_batches: bool = False
+    track_serials: bool = False
 
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    hsn: Optional[str] = None
+    unit: Optional[str] = None
+    category: Optional[str] = None
+    item_type: Optional[str] = None
+    selling_price: Optional[float] = None
+    cost_price: Optional[float] = None
+    stock_quantity: Optional[float] = None
+    low_stock_threshold: Optional[float] = None
+    reorder_point: Optional[float] = None
+    track_batches: Optional[bool] = None
+    track_serials: Optional[bool] = None
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+class StockMovementCreate(BaseModel):
+    product_id: str
+    quantity: float  # Positive for IN, Negative for OUT
+    type: str  # 'SALE', 'PURCHASE', 'ADJUSTMENT', 'RETURN'
+    source_id: Optional[str] = None  # Invoice ID, Purchase ID, etc.
+    notes: Optional[str] = None
+    date: Optional[str] = None
 
-class BusinessSetup(BaseModel):
-    name: str
-    address: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[EmailStr] = None
-    gstin: Optional[str] = None
-    financial_year_start: str = "April"
-    opening_cash: float = 0
-    opening_bank: float = 0
+class BatchCreate(BaseModel):
+    product_id: str
+    batch_number: str
+    quantity: float
+    manufacturing_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+
+class SerialNumberCreate(BaseModel):
+    product_id: str
+    batch_id: Optional[str] = None
+    serial_number: str
+    status: str = "IN_STOCK"  # IN_STOCK, SOLD, LOST
 
 class CustomerCreate(BaseModel):
     name: str
+    email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
     gstin: Optional[str] = None
     opening_balance: float = 0
-    balance_type: str = "debit"
+    balance_type: Optional[str] = "debit"
 
-class ProductCreate(BaseModel):
-    name: str
-    sku: Optional[str] = None
-    selling_price: float
-    cost_price: float = 0
-    opening_stock: float = 0
-    low_stock_threshold: float = 10
+class CustomerUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    gstin: Optional[str] = None
 
 class SupplierCreate(BaseModel):
     name: str
+    email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
     gstin: Optional[str] = None
     opening_balance: float = 0
 
 class SupplierUpdate(BaseModel):
-    name: str
+    name: Optional[str] = None
+    email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
     gstin: Optional[str] = None
 
-class PurchaseItem(BaseModel):
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class ModulesSettings(BaseModel):
+    enable_credit_notes: bool = True
+    enable_debit_notes: bool = True
+    enable_advanced_ims: bool = False
+    enable_production: bool = False
+
+# BOM and Production Order schemas
+class BOMComponent(BaseModel):
+    material_id: str
+    quantity: float
+    unit: Optional[str] = None
+
+class BOMCreate(BaseModel):
+    version: str = "1.0"
+    components: List[BOMComponent]
+
+class ProductionOrderCreate(BaseModel):
     product_id: str
     quantity: float
+    batch_id: Optional[str] = None
+    notes: Optional[str] = None
+    planned_start_date: Optional[str] = None
+
+class ProductionOrderUpdate(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    batch_id: Optional[str] = None
+    ingredient_overrides: Optional[List[dict]] = None  # [{material_id, batch_id}]
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class BusinessSetup(BaseModel):
+    name: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    gstin: Optional[str] = None
+    opening_cash: float = 0
+    opening_bank: float = 0
+
+class PurchaseItem(BaseModel):
+    product_id: Optional[str] = None
+    quantity: float
     cost_price: float
+    batch_id: Optional[str] = None
+    serial_numbers: Optional[List[str]] = None
 
 class PurchaseCreate(BaseModel):
     supplier_id: Optional[str] = None
@@ -124,6 +239,8 @@ class PurchaseCreate(BaseModel):
     payment_status: str = "unpaid"  # cash, bank, unpaid
     date: Optional[str] = None
     notes: Optional[str] = None
+    attachment_url: Optional[str] = None
+    apply_debit: bool = False
 
 class PurchaseUpdate(BaseModel):
     supplier_id: Optional[str] = None
@@ -131,12 +248,16 @@ class PurchaseUpdate(BaseModel):
     payment_status: str = "unpaid"
     date: Optional[str] = None
     notes: Optional[str] = None
+    attachment_url: Optional[str] = None
+    apply_debit: bool = False
 
 class InvoiceLineItem(BaseModel):
     product_id: Optional[str] = None  # None for free-text items
     description: str
     quantity: float
     rate: float
+    batch_id: Optional[str] = None
+    serial_numbers: Optional[List[str]] = None
 
 class InvoiceCreate(BaseModel):
     customer_id: str
@@ -144,11 +265,15 @@ class InvoiceCreate(BaseModel):
     notes: Optional[str] = None
     date: Optional[str] = None
     is_draft: bool = False
+    attachment_url: Optional[str] = None
+    apply_credit: bool = False
 
 class InvoiceUpdate(BaseModel):
     items: List[InvoiceLineItem]
     notes: Optional[str] = None
     date: Optional[str] = None
+    attachment_url: Optional[str] = None
+    apply_credit: bool = False
 
 class PaymentCreate(BaseModel):
     customer_id: str
@@ -156,6 +281,10 @@ class PaymentCreate(BaseModel):
     mode: str
     date: Optional[str] = None
     notes: Optional[str] = None
+    use_credit: bool = False
+    invoice_id: Optional[str] = None
+    credit_note_id: Optional[str] = None  # CN to apply when recording payment
+    advance_payment_id: Optional[str] = None # Advance Payment to apply
 
 class PaymentUpdate(BaseModel):
     amount: float
@@ -169,6 +298,7 @@ class ExpenseCreate(BaseModel):
     mode: str
     category: Optional[str] = None
     date: Optional[str] = None
+    attachment_url: Optional[str] = None
 
 class ExpenseUpdate(BaseModel):
     description: str
@@ -176,6 +306,7 @@ class ExpenseUpdate(BaseModel):
     mode: str
     category: Optional[str] = None
     date: Optional[str] = None
+    attachment_url: Optional[str] = None
 
 class CreditNoteItem(BaseModel):
     product_id: Optional[str] = None
@@ -190,6 +321,12 @@ class CreditNoteCreate(BaseModel):
     reason: Optional[str] = None
     date: Optional[str] = None
 
+class CreditNoteUpdate(BaseModel):
+    items: List[CreditNoteItem]
+    reason: Optional[str] = None
+    date: Optional[str] = None
+    invoice_id: Optional[str] = None
+
 class DebitNoteItem(BaseModel):
     product_id: str
     quantity: float
@@ -202,6 +339,12 @@ class DebitNoteCreate(BaseModel):
     reason: Optional[str] = None
     date: Optional[str] = None
 
+class DebitNoteUpdate(BaseModel):
+    items: List[DebitNoteItem]
+    reason: Optional[str] = None
+    date: Optional[str] = None
+    purchase_id: Optional[str] = None
+
 class S3Settings(BaseModel):
     aws_access_key_id: str
     aws_secret_access_key: str
@@ -210,6 +353,12 @@ class S3Settings(BaseModel):
 
 class SystemSettings(BaseModel):
     registration_enabled: bool = False
+    company_name: Optional[str] = None
+    company_email: Optional[str] = None
+    company_phone: Optional[str] = None
+    company_address: Optional[str] = None
+    tax_id: Optional[str] = None
+    default_currency: Optional[str] = "₹"
 
 # ============== AUTH HELPERS ==============
 
@@ -391,47 +540,196 @@ async def apply_payment_fifo(customer_id: str, amount: float, payment_id: str):
     return remaining
 
 async def get_customer_credit(customer_id: str) -> float:
-    """Get customer's available credit (advance/overpayment)"""
-    balance = await get_account_balance(f"customer_credit:{customer_id}")
-    return max(0, -balance)  # Credit is stored as negative (credit side)
+    """Get customer's available credit from Credit Notes (single source of truth)."""
+    pipeline = [
+        {"$match": {"customer_id": customer_id, "total": {"$gt": 0}}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]
+    result = await db.credit_notes.aggregate(pipeline).to_list(1)
+    if result:
+        return round(result[0]["total"], 2)
+    return 0.0
+
+
+async def apply_debit_to_purchase(supplier_id: str, purchase_id: str, purchase_total: float) -> tuple:
+    """
+    Calculate usage of Supplier Debit/Advance using Single Account logic.
+    Returns (amount_due, debit_applied).
+    """
+    # 1. Get current balance (Post-Purchase-Entry)
+    # Supplier Account: Credit = Payable (Liability), Debit = Advance (Asset)
+    # Balance = Debits - Credits.
+    # If Balance < 0, we owe money (Payable).
+    current_balance = await get_account_balance(f"supplier:{supplier_id}")
+    
+    # 2. Calculate Pre-Transaction Balance to find what was available BEFORE this purchase
+    # Purchase Entry was: Cr Supplier (credit += purchase_total)
+    # So Balance DECREASED by purchase_total.
+    # pre_balance = current_balance + purchase_total
+    # Example: 
+    #   Open: Dr 500 (Advance). Bal = 500.
+    #   Purchase: Cr 200.
+    #   Current Bal = 500 - 200 = 300.
+    #   Pre Bal = 300 + 200 = 500. (Correct)
+    
+    # Example 2:
+    #   Open: Dr 100.
+    #   Purchase: Cr 300.
+    #   Current Bal = 100 - 300 = -200 (Payable).
+    #   Pre Bal = -200 + 300 = 100. (Available Advance)
+    
+    pre_balance = current_balance + purchase_total
+    
+    # 3. Determine Available Debit (Advance)
+    available_debit = max(0, pre_balance)
+    
+    # 4. Calculate Applied Amount
+    debit_applied = min(available_debit, purchase_total)
+    
+    # 5. Determine New Status
+    amount_due = purchase_total - debit_applied
+    
+    if amount_due <= 0:
+        new_status = "paid"
+    elif amount_due < purchase_total:
+        new_status = "partially_paid"
+    else:
+        new_status = "unpaid"
+            
+    # 6. Update Purchase Record
+    await db.purchases.update_one(
+        {"id": purchase_id},
+        {"$set": {
+            "payment_status": new_status, 
+            "debit_used": debit_applied,
+            "amount_due": amount_due
+        }}
+    )
+    
+    return amount_due, debit_applied
 
 async def apply_credit_to_invoice(customer_id: str, invoice_id: str, invoice_total: float) -> tuple:
-    """Apply available credit to invoice. Returns (amount_due, credit_applied)."""
-    credit = await get_customer_credit(customer_id)
-    if credit <= 0:
+    """
+    Apply available ledger credit to invoice.
+    Returns (amount_due, credit_applied).
+    """
+    current_balance = await get_account_balance(f"customer:{customer_id}")
+    pre_balance = current_balance - invoice_total
+    available_credit = max(0, -pre_balance)
+    
+    if available_credit <= 0:
         return invoice_total, 0
     
-    apply_amount = min(credit, invoice_total)
+    allocations = await db.payment_allocations.find({"invoice_id": invoice_id}).to_list(1000)
+    cash_paid = sum(a["amount"] for a in allocations)
+    needed_amount = max(0, invoice_total - cash_paid)
+    credit_applied = min(available_credit, needed_amount)
     
-    # Reduce credit (debit the credit account)
-    await create_ledger_entry(
-        account=f"customer_credit:{customer_id}",
-        debit=apply_amount,
-        credit=0,
-        narration=f"Credit applied to invoice",
-        ref_type="invoice_credit",
-        ref_id=invoice_id
-    )
+    total_paid = cash_paid + credit_applied
+    amount_due = invoice_total - total_paid
+    new_status = "paid" if amount_due <= 0 else "partially_paid"
     
-    # CREDIT the Customer Account (Reduce the Receivable for this invoice)
-    await create_ledger_entry(
-        account=f"customer:{customer_id}",
-        debit=0,
-        credit=apply_amount,
-        narration=f"Credit applied from balance",
-        ref_type="invoice_credit",
-        ref_id=invoice_id
-    )
-    
-    # Update invoice
-    new_paid = apply_amount
-    new_status = "paid" if new_paid >= invoice_total else "partially_paid"
     await db.invoices.update_one(
         {"id": invoice_id},
-        {"$set": {"paid_amount": new_paid, "status": new_status, "credit_applied": apply_amount}}
+        {"$set": {
+            "paid_amount": total_paid, 
+            "status": new_status, 
+            "credit_applied": credit_applied
+        }}
     )
     
-    return invoice_total - apply_amount, apply_amount
+    return amount_due, credit_applied
+
+
+async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> float:
+    """
+    Apply a Credit Note to an invoice.
+    Reduces CN total, updates invoice paid_amount, creates ledger entries.
+    Returns amount applied.
+    """
+    cn = await db.credit_notes.find_one({"id": credit_note_id})
+    if not cn or cn["total"] <= 0:
+        return 0
+
+    invoice = await db.invoices.find_one({"id": invoice_id})
+    if not invoice:
+        return 0
+
+    invoice_due = invoice["total"] - invoice.get("paid_amount", 0)
+    if invoice_due <= 0:
+        return 0
+
+    apply_amount = round(min(cn["total"], invoice_due), 2)
+    new_cn_total = round(cn["total"] - apply_amount, 2)
+    new_paid = round(invoice.get("paid_amount", 0) + apply_amount, 2)
+    new_status = "paid" if new_paid >= invoice["total"] else "partially_paid"
+
+    # Update Credit Note balance
+    await db.credit_notes.update_one(
+        {"id": credit_note_id},
+        {"$set": {"total": new_cn_total}}
+    )
+
+    # Update Invoice
+    await db.invoices.update_one(
+        {"id": invoice_id},
+        {"$set": {"paid_amount": new_paid, "status": new_status,
+                  "credit_note_applied": invoice.get("credit_note_applied", 0) + apply_amount}}
+    )
+
+    # No ledger entry needed here! The customer ledger was already credited 
+    # when the Credit Note was first generated.
+
+    return apply_amount
+
+async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: str) -> float:
+    """
+    Apply an Advance Payment to an invoice.
+    Reduces remaining_amount, updates invoice paid_amount, creates ledger entries.
+    """
+    adv = await db.advance_payments.find_one({"id": advance_payment_id})
+    if not adv or adv.get("remaining_amount", 0) <= 0:
+        return 0
+
+    invoice = await db.invoices.find_one({"id": invoice_id})
+    if not invoice:
+        return 0
+
+    invoice_due = invoice["total"] - invoice.get("paid_amount", 0)
+    if invoice_due <= 0:
+        return 0
+
+    apply_amount = round(min(adv["remaining_amount"], invoice_due), 2)
+    new_adv_remaining = round(adv["remaining_amount"] - apply_amount, 2)
+    new_paid = round(invoice.get("paid_amount", 0) + apply_amount, 2)
+    new_status = "paid" if new_paid >= invoice["total"] else "partially_paid"
+
+    # Update Advance Payment balance
+    await db.advance_payments.update_one(
+        {"id": advance_payment_id},
+        {"$set": {"remaining_amount": new_adv_remaining}}
+    )
+
+    # Update Invoice
+    await db.invoices.update_one(
+        {"id": invoice_id},
+        {"$set": {"paid_amount": new_paid, "status": new_status,
+                  "advance_payment_applied": invoice.get("advance_payment_applied", 0) + apply_amount}}
+    )
+
+    # Link the original payment to this invoice for rollback support
+    await db.payment_allocations.insert_one({
+        "id": str(uuid.uuid4()),
+        "payment_id": adv["payment_id"],
+        "invoice_id": invoice_id,
+        "amount": apply_amount,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    # No ledger entry needed here! The customer ledger was already credited 
+    # when the Advance Payment was first recorded (cash received).
+    
+    return apply_amount
 
 # ============== STOCK HELPERS ==============
 
@@ -446,7 +744,7 @@ async def get_product_stock(product_id: str) -> float:
         return result[0]["total_in"] - result[0]["total_out"]
     return 0
 
-async def create_stock_movement(product_id: str, quantity_in: float, quantity_out: float, ref_type: str, ref_id: str, date: str = None):
+async def create_stock_movement(product_id: str, quantity_in: float, quantity_out: float, ref_type: str, ref_id: str, date: str = None, batch_id: str = None, serial_numbers: list = None):
     """Record stock movement"""
     movement = {
         "id": str(uuid.uuid4()),
@@ -455,10 +753,79 @@ async def create_stock_movement(product_id: str, quantity_in: float, quantity_ou
         "quantity_out": quantity_out,
         "ref_type": ref_type,
         "ref_id": ref_id,
+        "batch_id": batch_id,
+        "serial_numbers": serial_numbers or [],
         "date": date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.stock_movements.insert_one(movement)
+
+    if quantity_out > 0 and ref_type in ["invoice", "PRODUCTION_CONSUMED"]:
+        product = await db.products.find_one({"id": product_id}, {"_id": 0, "cost_price": 1})
+        cost = quantity_out * product.get("cost_price", 0) if product else 0
+        if cost > 0:
+            await create_ledger_entry(
+                account="cogs",
+                debit=cost,
+                credit=0,
+                narration=f"COGS for {ref_type} {ref_id}",
+                ref_type=ref_type,
+                ref_id=ref_id,
+                date=date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+            await create_ledger_entry(
+                account="inventory_asset",
+                debit=0,
+                credit=cost,
+                narration=f"Inventory reduction for {ref_type} {ref_id}",
+                ref_type=ref_type,
+                ref_id=ref_id,
+                date=date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+
+    if quantity_in > 0 and ref_type in ["credit_note", "PRODUCTION_OUTPUT"]:
+        product = await db.products.find_one({"id": product_id}, {"_id": 0, "cost_price": 1})
+        cost = quantity_in * product.get("cost_price", 0) if product else 0
+        if cost > 0:
+            await create_ledger_entry(
+                account="inventory_asset",
+                debit=cost,
+                credit=0,
+                narration=f"Inventory capitalization for {ref_type} {ref_id}",
+                ref_type=ref_type,
+                ref_id=ref_id,
+                date=date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+            await create_ledger_entry(
+                account="cogs",
+                debit=0,
+                credit=cost,
+                narration=f"COGS offset for {ref_type} {ref_id}",
+                ref_type=ref_type,
+                ref_id=ref_id,
+                date=date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+
+    # Process Advanced IMS properties if enabled
+    settings = await db.settings.find_one({"type": "modules"}) or {}
+    if settings.get("enable_advanced_ims", False):
+        product = await db.products.find_one({"id": product_id})
+        if product:
+            if quantity_in > 0 and product.get("track_serials") and serial_numbers:
+                for sn in serial_numbers:
+                    await db.serial_numbers.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "product_id": product_id,
+                        "batch_id": batch_id,
+                        "serial_number": sn,
+                        "status": "IN_STOCK",
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    })
+            if quantity_out > 0 and product.get("track_serials") and serial_numbers:
+                await db.serial_numbers.update_many(
+                    {"serial_number": {"$in": serial_numbers}, "product_id": product_id},
+                    {"$set": {"status": "SOLD"}}
+                )
     return movement
 
 async def delete_stock_movements(ref_type: str, ref_id: str):
@@ -466,30 +833,6 @@ async def delete_stock_movements(ref_type: str, ref_id: str):
     await db.stock_movements.delete_many({"ref_type": ref_type, "ref_id": ref_id})
 
 # ============== AUTH ROUTES ==============
-
-@api_router.post("/auth/register", response_model=Token)
-async def register(user: UserCreate):
-    # Check if registration is enabled
-    settings = await db.settings.find_one({"type": "system"})
-    if not settings or not settings.get("registration_enabled", False):
-        raise HTTPException(status_code=403, detail="Registration is currently closed")
-
-    existing = await db.users.find_one({"email": user.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": user.email,
-        "password_hash": get_password_hash(user.password),
-        "name": user.name,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    await db.users.insert_one(user_doc)
-    
-    access_token = create_access_token(data={"sub": user_id})
-    return {"access_token": access_token, "token_type": "bearer"}
 
 @api_router.post("/auth/login", response_model=Token)
 async def login(user: UserLogin):
@@ -557,8 +900,14 @@ async def create_product(product: ProductCreate, current_user: dict = Depends(ge
     return {"message": "Product created", "id": product_id}
 
 @api_router.get("/products")
-async def list_products(current_user: dict = Depends(get_current_user)):
-    products = await db.products.find({}, {"_id": 0}).to_list(1000)
+async def list_products(item_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    query = {}
+    if item_type:
+        # Support comma separated if multiple types needed
+        types = [t.strip() for t in item_type.split(",")]
+        query["item_type"] = {"$in": types} if len(types) > 1 else types[0]
+        
+    products = await db.products.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
     
     for product in products:
         product["current_stock"] = await get_product_stock(product["id"])
@@ -608,6 +957,337 @@ async def delete_product(product_id: str, current_user: dict = Depends(get_curre
     await db.products.delete_one({"id": product_id})
     return {"message": "Product deleted"}
 
+@api_router.get("/products/{product_id}/stock-movements")
+async def get_product_stock_movements(product_id: str, current_user: dict = Depends(get_current_user)):
+    movements = await db.stock_movements.find({"product_id": product_id}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return movements
+
+@api_router.get("/products/{product_id}/batches")
+async def get_product_batches(product_id: str, current_user: dict = Depends(get_current_user)):
+    batches = await db.batches.find({"product_id": product_id}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return batches
+
+@api_router.get("/products/{product_id}/serial-numbers")
+async def get_product_serial_numbers(product_id: str, current_user: dict = Depends(get_current_user)):
+    serials = await db.serial_numbers.find({"product_id": product_id}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return serials
+
+@api_router.get("/products/{product_id}/labels")
+async def generate_product_labels(
+    product_id: str,
+    batch_id: Optional[str] = None,
+    serial_numbers: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+        
+    import qrcode
+    import base64
+    from io import BytesIO
+        
+    serials_list = []
+    if serial_numbers:
+        serials_list = [s.strip() for s in serial_numbers.split(",") if s.strip()]
+    
+    # If no specific serials requested but batch is, or just product
+    if not serials_list:
+        serials_list = [""]
+        
+    labels = []
+    for sn in serials_list:
+        payload = f"EZ|PRD:{product_id}"
+        if batch_id:
+            payload += f"|BAT:{batch_id}"
+        if sn:
+            payload += f"|SER:{sn}"
+            
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        labels.append({
+            "payload": payload,
+            "serial_number": sn or None,
+            "batch_id": batch_id,
+            "qr_code": f"data:image/png;base64,{img_str}"
+        })
+        
+    return {"labels": labels}
+
+# ============== BILL OF MATERIALS ==============
+
+@api_router.get("/products/{product_id}/bom")
+async def get_bom(product_id: str, current_user: dict = Depends(get_current_user)):
+    bom = await db.bill_of_materials.find_one({"product_id": product_id}, {"_id": 0})
+    if not bom:
+        return {"bom": None}
+    
+    # Enrich components with product info and current stock
+    enriched = []
+    for comp in bom.get("components", []):
+        mat = await db.products.find_one({"id": comp["material_id"]}, {"_id": 0})
+        stock = await get_product_stock(comp["material_id"])
+        required = comp["quantity"]
+        enriched.append({
+            **comp,
+            "material_name": mat["name"] if mat else "Unknown",
+            "material_unit": mat.get("unit", "pcs") if mat else "pcs",
+            "current_stock": stock,
+            "sufficient": stock >= required
+        })
+    bom["components"] = enriched
+    return {"bom": bom}
+
+@api_router.post("/products/{product_id}/bom")
+async def save_bom(product_id: str, bom_data: BOMCreate, current_user: dict = Depends(get_current_user)):
+    product = await db.products.find_one({"id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    bom_doc = {
+        "product_id": product_id,
+        "version": bom_data.version,
+        "components": [c.model_dump() for c in bom_data.components],
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.bill_of_materials.update_one(
+        {"product_id": product_id},
+        {"$set": bom_doc},
+        upsert=True
+    )
+    return {"message": "BOM saved successfully"}
+
+# ============== PRODUCTION ORDERS ==============
+
+@api_router.get("/production-orders")
+async def list_production_orders(
+    status: Optional[str] = None,
+    product_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+    if status:
+        query["status"] = status
+    if product_id:
+        query["product_id"] = product_id
+    
+    orders = await db.production_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    
+    # Enrich with product names
+    for o in orders:
+        p = await db.products.find_one({"id": o["product_id"]}, {"_id": 0})
+        o["product_name"] = p["name"] if p else "Unknown"
+    
+    return orders
+
+@api_router.post("/production-orders")
+async def create_production_order(order: ProductionOrderCreate, current_user: dict = Depends(get_current_user)):
+    product = await db.products.find_one({"id": order.product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    bom = await db.bill_of_materials.find_one({"product_id": order.product_id}, {"_id": 0})
+    
+    # Generate order number
+    count = await db.production_orders.count_documents({})
+    order_number = f"WO-{str(count + 1).zfill(4)}"
+    
+    # Calculate ingredients needed
+    ingredients = []
+    if bom:
+        for comp in bom.get("components", []):
+            ingredients.append({
+                "material_id": comp["material_id"],
+                "quantity_required": comp["quantity"] * order.quantity,
+                "quantity_consumed": 0,
+                "batch_id": None
+            })
+    
+    order_doc = {
+        "id": str(uuid.uuid4()),
+        "order_number": order_number,
+        "product_id": order.product_id,
+        "bom_id": bom["id"] if bom and "id" in bom else None,
+        "quantity": order.quantity,
+        "batch_id": order.batch_id,
+        "status": "PLANNED",
+        "notes": order.notes or "",
+        "planned_start_date": order.planned_start_date,
+        "started_at": None,
+        "completed_at": None,
+        "ingredients": ingredients,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": current_user.get("email", "")
+    }
+    await db.production_orders.insert_one(order_doc)
+    order_doc.pop("_id", None)
+    return {"message": "Production order created", "order": order_doc}
+
+@api_router.get("/production-orders/{order_id}")
+async def get_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
+    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    # Enrich
+    p = await db.products.find_one({"id": order["product_id"]}, {"_id": 0})
+    order["product_name"] = p["name"] if p else "Unknown"
+    
+    for ing in order.get("ingredients", []):
+        mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
+        ing["material_name"] = mat["name"] if mat else "Unknown"
+        ing["current_stock"] = await get_product_stock(ing["material_id"])
+    
+    return order
+
+@api_router.put("/production-orders/{order_id}/start")
+async def start_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
+    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order["status"] != "PLANNED":
+        raise HTTPException(status_code=400, detail=f"Cannot start order in status: {order['status']}")
+    
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Consume raw materials — verify ALL sufficient before touching any stock
+    for ing in order.get("ingredients", []):
+        available = await get_product_stock(ing["material_id"])
+        if available < ing["quantity_required"]:
+            mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
+            name = mat["name"] if mat else ing["material_id"]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient stock for '{name}': need {ing['quantity_required']}, have {round(available, 4)}"
+            )
+
+    # All materials sufficient — deduct via canonical create_stock_movement
+    for ing in order.get("ingredients", []):
+        await create_stock_movement(
+            product_id=ing["material_id"],
+            quantity_in=0,
+            quantity_out=ing["quantity_required"],
+            ref_type="PRODUCTION_CONSUMED",
+            ref_id=order_id,
+            date=today,
+            batch_id=ing.get("batch_id")
+        )
+        await db.production_orders.update_one(
+            {"id": order_id, "ingredients.material_id": ing["material_id"]},
+            {"$set": {"ingredients.$.quantity_consumed": ing["quantity_required"]}}
+        )
+
+    await db.production_orders.update_one(
+        {"id": order_id},
+        {"$set": {"status": "IN_PROGRESS", "started_at": now_iso}}
+    )
+    return {"message": "Production order started. Raw materials consumed from stock."}
+
+@api_router.put("/production-orders/{order_id}/qc")
+async def send_to_qc(order_id: str, current_user: dict = Depends(get_current_user)):
+    """Move a started work order into QC review before final completion."""
+    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order["status"] != "IN_PROGRESS":
+        raise HTTPException(status_code=400, detail=f"Only IN_PROGRESS orders can be sent to QC (current: {order['status']})")
+    await db.production_orders.update_one(
+        {"id": order_id},
+        {"$set": {"status": "QC", "qc_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Order moved to QC. Review and then mark as Completed."}
+
+@api_router.put("/production-orders/{order_id}/complete")
+async def complete_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
+    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order["status"] not in ["IN_PROGRESS", "QC"]:
+        raise HTTPException(status_code=400, detail=f"Cannot complete order in status: {order['status']}")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Add finished goods to stock via canonical create_stock_movement
+    await create_stock_movement(
+        product_id=order["product_id"],
+        quantity_in=order["quantity"],
+        quantity_out=0,
+        ref_type="PRODUCTION_OUTPUT",
+        ref_id=order_id,
+        date=today,
+        batch_id=order.get("batch_id")
+    )
+
+    # If a batch_id is set, upsert the batch record
+    if order.get("batch_id"):
+        existing_batch = await db.batches.find_one({"product_id": order["product_id"], "batch_number": order["batch_id"]})
+        if existing_batch:
+            await db.batches.update_one(
+                {"product_id": order["product_id"], "batch_number": order["batch_id"]},
+                {"$inc": {"quantity": order["quantity"]}}
+            )
+        else:
+            await db.batches.insert_one({
+                "id": str(uuid.uuid4()),
+                "product_id": order["product_id"],
+                "batch_number": order["batch_id"],
+                "quantity": order["quantity"],
+                "source": "production_order",
+                "source_id": order_id,
+                "created_at": now_iso
+            })
+
+    await db.production_orders.update_one(
+        {"id": order_id},
+        {"$set": {"status": "COMPLETED", "completed_at": now_iso}}
+    )
+    return {"message": f"Production order completed. {order['quantity']} units added to finished goods stock."}
+
+@api_router.put("/production-orders/{order_id}/cancel")
+async def cancel_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
+    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order["status"] == "COMPLETED":
+        raise HTTPException(status_code=400, detail="Cannot cancel a completed order")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Return already-consumed materials to stock
+    if order["status"] in ["IN_PROGRESS", "QC"]:
+        for ing in order.get("ingredients", []):
+            consumed = ing.get("quantity_consumed", 0)
+            if consumed > 0:
+                await create_stock_movement(
+                    product_id=ing["material_id"],
+                    quantity_in=consumed,
+                    quantity_out=0,
+                    ref_type="PRODUCTION_RETURN",
+                    ref_id=order["id"],
+                    date=today,
+                    batch_id=ing.get("batch_id")
+                )
+
+    await db.production_orders.update_one(
+        {"id": order["id"]},
+        {"$set": {"status": "CANCELLED", "cancelled_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Production order cancelled. Materials returned to stock."}
+
 # ============== SUPPLIERS ==============
 
 @api_router.post("/suppliers")
@@ -631,7 +1311,7 @@ async def create_supplier(supplier: SupplierCreate, current_user: dict = Depends
 
 @api_router.get("/suppliers")
 async def list_suppliers(current_user: dict = Depends(get_current_user)):
-    suppliers = await db.suppliers.find({}, {"_id": 0}).to_list(1000)
+    suppliers = await db.suppliers.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
     
     for supplier in suppliers:
         # Payable = credits - debits (we owe them)
@@ -649,6 +1329,49 @@ async def get_supplier(supplier_id: str, current_user: dict = Depends(get_curren
     balance = await get_account_balance(f"supplier:{supplier_id}")
     supplier["payable"] = max(0, -balance)
     return supplier
+
+@api_router.get("/suppliers/{supplier_id}/ledger")
+async def get_supplier_ledger(supplier_id: str, current_user: dict = Depends(get_current_user)):
+    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    
+    # Logic similar to customer ledger but for supplier (liability)
+    # Account: supplier:{id}
+    # Debit = Payment Made / Purchase Return (Reduces Liability)
+    # Credit = Purchase / Debit Note? (Increases Liability)
+    
+    entries = await db.ledger.find(
+        {"account": f"supplier:{supplier_id}"},
+        {"_id": 0}
+    ).sort("date", 1).to_list(1000)
+    
+    ledger = []
+    running_balance = 0
+    
+    for entry in entries:
+        # Supplier is Liability: Credit increases, Debit decreases
+        # Balance = Credits - Debits
+        running_balance += entry["credit"] - entry["debit"]
+        
+        if entry["credit"] > 0:
+            description = f"Purchase - {entry['narration']}"
+            amount = entry["credit"]
+            type_ = "purchase"
+        else:
+            description = f"Payment Made - {entry['narration']}"
+            amount = entry["debit"]
+            type_ = "payment"
+            
+        ledger.append({
+            "date": entry["date"],
+            "description": description,
+            "amount": amount,
+            "type": type_,
+            "balance": running_balance
+        })
+    
+    return {"supplier": supplier, "ledger": ledger, "current_balance": running_balance}
 
 @api_router.put("/suppliers/{supplier_id}")
 async def update_supplier(supplier_id: str, supplier: SupplierUpdate, current_user: dict = Depends(get_current_user)):
@@ -708,7 +1431,12 @@ async def create_purchase(purchase: PurchaseCreate, current_user: dict = Depends
         await db.products.update_one({"id": item.product_id}, {"$set": {"cost_price": item.cost_price}})
         
         # Create stock movement (stock in)
-        await create_stock_movement(item.product_id, item.quantity, 0, "purchase", purchase_id, purchase_date)
+        # Restrict batch/serial validation here? (Wait, I just need to call it)
+        await create_stock_movement(
+            item.product_id, item.quantity, 0, "purchase", purchase_id, purchase_date,
+            batch_id=getattr(item, "batch_id", None),
+            serial_numbers=getattr(item, "serial_numbers", None)
+        )
     
     supplier_name = None
     if purchase.supplier_id:
@@ -740,44 +1468,16 @@ async def create_purchase(purchase: PurchaseCreate, current_user: dict = Depends
         # Create supplier payable
         await create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
 
-    # Debit Purchases Account
-    await create_ledger_entry("purchases", total, 0, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
+    # Debit Inventory Asset Account (not Purchases expense directly, for accrual accuracy)
+    await create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
 
     # Check for Supplier Debit Balance (Advance/Debit Note) and update status/ledger awareness if needed
-    if purchase.supplier_id and purchase.payment_status == "unpaid":
-         # We already Credited the supplier above (Lines 730-731).
-         # Now check if the *Resulting* or *Previous* balance implies we are "Paid" or "Partially Paid".
-         # Actually, it's better to check balance *before* (or calculate effectively).
-         # We just added a Credit of `total`.
-         current_balance = await get_account_balance(f"supplier:{purchase.supplier_id}")
-         # current_balance includes the transaction we just posted.
-         # If current_balance >= 0, it means even after this purchase, we don't owe them (or exactly zero). 
-         # So it's effectively "Paid".
-         # If current_balance < 0, but it's "Less Negative" than -total? 
-         # Example: Old Balance +5k. Purchase 10k (Cr 10k). New Balance -5k.
-         # Used 5k. Remaining Debt 5k. Status: Partially Paid.
-         
-         # Logic:
-         # Amount covered = Total - (Amount we now owe specific to this purchase?)
-         # This is hard with pooled account. 
-         # Heuristic: 
-         # If Old Balance > 0:
-         #    Covered = min(Old Balance, Total)
-         #    New Status = Paid (if Covered >= Total) else Partially Paid
-         # We can derive Old Balance = current_balance + total (since we just Credited/subtracted total).
-         
-         old_balance = current_balance + total
-         if old_balance > 0:
-             covered = min(old_balance, total)
-             new_status = "paid" if covered >= total else "partially_paid"
-             
-             # We should perform a "Virtual" allocation or just update the status?
-             # Since it's a single account, the Ledger is fine. We just update the Document for UI.
-             await db.purchases.update_one(
-                 {"id": purchase_id},
-                 {"$set": {"payment_status": new_status, "notes": (purchase.notes or "") + f" (Auto-adjusted using debit balance of {covered})" }}
-             )
-             return {"message": "Purchase recorded", "id": purchase_id, "purchase_number": purchase_number, "debit_used": covered}
+    debit_used = 0
+    if purchase.supplier_id and purchase.payment_status == "unpaid" and purchase.apply_debit:
+         amount_due, debit_used = await apply_debit_to_purchase(purchase.supplier_id, purchase_id, total)
+         # apply_debit_to_purchase updates the purchase status and debit_used field
+         if debit_used > 0:
+             return {"message": "Purchase recorded", "id": purchase_id, "purchase_number": purchase_number, "debit_used": debit_used}
     
     return {"message": "Purchase recorded", "id": purchase_id, "purchase_number": purchase_number, "debit_used": 0}
 
@@ -785,9 +1485,16 @@ async def create_purchase(purchase: PurchaseCreate, current_user: dict = Depends
 async def list_purchases(
     start_date: Optional[str] = None, 
     end_date: Optional[str] = None,
+    supplier_id: Optional[str] = None,
+    debit_used_only: bool = False,
     current_user: dict = Depends(get_current_user)
 ):
     query = {}
+    if supplier_id:
+        query["supplier_id"] = supplier_id
+    if debit_used_only:
+        query["debit_used"] = {"$gt": 0}
+
     if start_date and end_date:
         query["date"] = {"$gte": start_date, "$lte": end_date}
     
@@ -835,7 +1542,11 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
         await db.products.update_one({"id": item.product_id}, {"$set": {"cost_price": item.cost_price}})
         
         # Create stock movement (stock in)
-        await create_stock_movement(item.product_id, item.quantity, 0, "purchase", purchase_id, purchase_date)
+        await create_stock_movement(
+            item.product_id, 0, item.quantity, "purchase", purchase_id, purchase_date,
+            batch_id=getattr(item, "batch_id", None),
+            serial_numbers=getattr(item, "serial_numbers", None)
+        )
     
     supplier_name = None
     if purchase.supplier_id:
@@ -865,8 +1576,12 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
     elif purchase.payment_status == "unpaid" and purchase.supplier_id:
         await create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
 
-    # Debit Purchases Account (New)
-    await create_ledger_entry("purchases", total, 0, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
+    # Debit Inventory Asset Account (consistent with create_purchase)
+    await create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
+
+    # Check for Supplier Debit Balance (Advance/Debit Note) if requested
+    if purchase.supplier_id and purchase.payment_status == "unpaid" and purchase.apply_debit:
+         await apply_debit_to_purchase(purchase.supplier_id, purchase_id, total)
         
     return {"message": "Purchase updated"}
 
@@ -909,7 +1624,7 @@ async def create_customer(customer: CustomerCreate, current_user: dict = Depends
 
 @api_router.get("/customers")
 async def list_customers(current_user: dict = Depends(get_current_user)):
-    customers = await db.customers.find({}, {"_id": 0}).to_list(1000)
+    customers = await db.customers.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
     
     for customer in customers:
         customer["outstanding"] = await get_account_balance(f"customer:{customer['id']}")
@@ -933,59 +1648,204 @@ async def update_customer(customer_id: str, customer: CustomerCreate, current_us
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    update_data = customer.model_dump()
-    del update_data["opening_balance"]
-    del update_data["balance_type"]
+    update_data = customer.model_dump(exclude_unset=True)
+    update_data.pop("opening_balance", None)
+    update_data.pop("balance_type", None)
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
     
     await db.customers.update_one({"id": customer_id}, {"$set": update_data})
     return {"message": "Customer updated"}
 
 @api_router.get("/customers/{customer_id}/ledger")
-async def get_customer_ledger(customer_id: str, current_user: dict = Depends(get_current_user)):
+async def get_customer_ledger(
+    customer_id: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
     customer = await db.customers.find_one({"id": customer_id}, {"_id": 0})
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
-    
-    entries = await db.ledger.find(
-        {"account": {"$in": [f"customer:{customer_id}", f"customer_credit:{customer_id}"]}},
-        {"_id": 0}
-    ).sort("date", 1).to_list(1000)
-    
-    ledger = []
-    running_balance = 0
-    
-    for entry in entries:
-        if entry["account"].startswith("customer:") and not entry["account"].startswith("customer_credit:"):
-            running_balance += entry["debit"] - entry["credit"]
-            
-            if entry["debit"] > 0:
-                description = f"Sale - {entry['narration']}"
-                amount = entry["debit"]
-                type_ = "sale"
-            else:
-                description = f"Payment received - {entry['narration']}"
-                amount = entry["credit"]
-                type_ = "payment"
-        else:
-            if entry["credit"] > 0:
-                description = f"Credit added - {entry['narration']}"
-                amount = entry["credit"]
-                type_ = "credit_added"
-            else:
-                description = f"Credit used - {entry['narration']}"
-                amount = entry["debit"]
-                type_ = "credit_used"
-        
-        ledger.append({
-            "date": entry["date"],
-            "description": description,
-            "amount": amount,
-            "type": type_,
-            "balance": running_balance
+
+    rows = []
+
+    # ---- Invoices (Debit) ----
+    inv_query = {"customer_id": customer_id}
+    if start_date:
+        inv_query.setdefault("date", {})["$gte"] = start_date
+    if end_date:
+        inv_query.setdefault("date", {})["$lte"] = end_date
+
+    invoices = await db.invoices.find(inv_query, {"_id": 0}).to_list(1000)
+    for inv in invoices:
+        rows.append({
+            "timestamp": inv.get("created_at", inv.get("date", "") + "T00:00:00Z"),
+            "date": inv.get("date", ""),
+            "type": "invoice",
+            "ref_number": inv.get("invoice_number", ""),
+            "ref_id": inv.get("id", ""),
+            "narration": f"Invoice — {inv.get('invoice_number', '')}",
+            "debit": inv.get("total", 0),
+            "credit": 0,
+            "status": inv.get("status", ""),
         })
+
+    # ---- Payments (Credit) ----
+    pay_query = {"customer_id": customer_id}
+    if start_date:
+        pay_query.setdefault("date", {})["$gte"] = start_date
+    if end_date:
+        pay_query.setdefault("date", {})["$lte"] = end_date
+
+    payments = await db.payments.find(pay_query, {"_id": 0}).to_list(1000)
+    for pay in payments:
+        # To avoid double counting, we only want the payment amount applied to invoices
+        # as a credit against the customer's outstanding balance.
+        # Let's read the actual ledger entries for this payment to get the applied amount.
+        pay_ledger = await db.ledger.find_one({
+            "ref_type": "payment", 
+            "ref_id": pay.get("id"), 
+            "account": f"customer:{customer_id}"
+        })
+        
+        applied_credit = pay_ledger["credit"] if pay_ledger else 0
+        
+        # Don't show payment row in ledger if 0 was applied (e.g. 100% went to CN)
+        # UNLESS they want to see it. Usually, we show the cash receipt, but since 
+        # it doesn't affect outstanding balance, showing 0 credit is weird. Let's show the applied credit.
+        rows.append({
+            "timestamp": pay.get("created_at", pay.get("date", "") + "T00:00:00Z"),
+            "date": pay.get("date", ""),
+            "type": "payment",
+            "ref_number": "",
+            "ref_id": pay.get("id", ""),
+            "narration": f"Payment — {pay.get('mode', '').capitalize()}{(' · ' + pay['notes']) if pay.get('notes') else ''}",
+            "debit": 0,
+            "credit": applied_credit,
+            "status": "",
+        })
+
+    # ---- Credit Notes created (Credit, but doesn't reduce outstanding yet) ----
+    cn_query = {"customer_id": customer_id}
+    if start_date:
+        cn_query.setdefault("date", {})["$gte"] = start_date
+    if end_date:
+        cn_query.setdefault("date", {})["$lte"] = end_date
+
+    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0}).to_list(1000)
+    for cn in credit_notes:
+        rows.append({
+            "timestamp": cn.get("created_at", cn.get("date", "") + "T00:00:00Z"),
+            "date": cn.get("date", ""),
+            "type": "credit_note",
+            "ref_number": cn.get("credit_note_number", ""),
+            "ref_id": cn.get("id", ""),
+            "narration": f"Credit Note {cn.get('credit_note_number', '')} — {cn.get('reason', '')}",
+            "debit": 0,
+            "credit": 0,  # CN Creation DOES NOT reduce outstanding
+            "cn_total": cn.get("total", 0),
+            "cn_original_total": cn.get("total", 0),
+            "status": "active" if cn.get("total", 0) > 0 else "exhausted",
+        })
+
+    # ---- Credit Note Applications (Credit - reduces outstanding) ----
+    cn_app_query = {
+        "account": f"customer:{customer_id}",
+        "ref_type": "credit_note_application"
+    }
+    if start_date:
+        cn_app_query.setdefault("date", {})["$gte"] = start_date
+    if end_date:
+        cn_app_query.setdefault("date", {})["$lte"] = end_date
+        
+    cn_applications = await db.ledger.find(cn_app_query, {"_id": 0}).to_list(1000)
+    for cn_app in cn_applications:
+        # Look up the timestamp of the actual invoice or CN to place it correctly, 
+        # or use a synthetic exact time since ledger doesn't track created_at currently.
+        # We will append an arbitrary time to ensure it sorts after the invoice it applies to.
+        rows.append({
+            "timestamp": cn_app.get("date", "") + "T23:59:59Z", 
+            "date": cn_app.get("date", ""),
+            "type": "credit_note_application",
+            "ref_number": "",
+            "ref_id": cn_app.get("ref_id", ""),
+            "narration": cn_app.get("narration", "Credit Note Applied"),
+            "debit": 0,
+            "credit": cn_app.get("credit", 0),
+            "status": "",
+        })
+
+    # ---- Opening Balance ----
+    opening_bal_query = {
+        "account": f"customer:{customer_id}",
+        "ref_type": "setup"
+    }
+    opening_bals = await db.ledger.find(opening_bal_query, {"_id": 0}).to_list(10)
+    for ob in opening_bals:
+        rows.append({
+            "timestamp": ob.get("date", "") + "T00:00:00Z",
+            "date": ob.get("date", ""),
+            "type": "opening_balance",
+            "ref_number": "",
+            "ref_id": ob.get("ref_id", ""),
+            "narration": "Opening Balance",
+            "debit": ob.get("debit", 0),
+            "credit": ob.get("credit", 0),
+            "status": "",
+        })
+
+    # Sort all rows strictly by exact timestamp, then by type priority if timestamps match
+    type_priority = {"opening_balance": 0, "invoice": 1, "payment": 2, "credit_note": 3, "credit_note_application": 4}
+    rows.sort(key=lambda r: (r.get("timestamp", ""), type_priority.get(r["type"], 99)))
+
+    # Compute running balance chronologically
+    running_balance = 0
+    ledger = []
     
-    return {"customer": customer, "ledger": ledger, "current_balance": running_balance}
+    total_invoiced = 0
+    total_paid = 0
+    
+    for row in rows:
+        running_balance += row["debit"] - row["credit"]
+        entry = {**row, "balance": round(running_balance, 2)}
+        ledger.append(entry)
+        
+        if row["type"] == "invoice":
+            total_invoiced += row["debit"]
+        elif row["type"] == "payment" or row["type"] == "credit_note_application":
+            total_paid += row["credit"]
+            
+    # For opening balance, if debit, it acts like invoiced, if credit, acts like paid
+    for ob in opening_bals:
+        total_invoiced += ob.get("debit", 0)
+        total_paid += ob.get("credit", 0)
+
+    cn_balance = await get_customer_credit(customer_id)
+
+    # Compute advance balance
+    adv_cursor = db.advance_payments.find({"customer_id": customer_id, "remaining_amount": {"$gt": 0}})
+    advance_payments = await adv_cursor.to_list(100)
+    adv_balance = sum([a["remaining_amount"] for a in advance_payments])
+
+    return {
+        "customer": {
+            **customer,
+            "outstanding": round(running_balance, 2),
+            "credit": cn_balance,
+            "advance_balance": adv_balance
+        },
+        "ledger": ledger,
+        "summary": {
+            "total_invoiced": round(total_invoiced, 2),
+            "total_paid": round(total_paid, 2),
+            "outstanding": round(running_balance, 2),
+            "cn_balance": cn_balance,
+            "adv_balance": round(adv_balance, 2)
+        },
+        "credit_notes": credit_notes,
+        "advance_payments": advance_payments
+    }
+
 
 @api_router.delete("/customers/{customer_id}")
 async def delete_customer(customer_id: str, current_user: dict = Depends(get_current_user)):
@@ -1101,10 +1961,15 @@ async def create_invoice(invoice: InvoiceCreate, current_user: dict = Depends(ge
         # Reduce stock for product items
         for item in items:
             if item.get("product_id"):
-                await create_stock_movement(item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date)
+                await create_stock_movement(
+                    item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                    batch_id=item.get("batch_id"),
+                    serial_numbers=item.get("serial_numbers")
+                )
         
-        # Auto-apply customer credit
-        amount_due, credit_applied = await apply_credit_to_invoice(invoice.customer_id, invoice_id, total)
+        # Auto-apply customer credit ONLY if requested
+        if invoice.apply_credit:
+            amount_due, credit_applied = await apply_credit_to_invoice(invoice.customer_id, invoice_id, total)
     
     response = {
         "message": "Invoice created",
@@ -1140,6 +2005,7 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
         await delete_stock_movements("invoice", invoice_id)
         
         # Reset payment allocations that applied credit
+        await db.payment_allocations.delete_many({"invoice_id": invoice_id})
         await db.invoices.update_one({"id": invoice_id}, {"$set": {"credit_applied": 0, "paid_amount": 0}})
     
     # Process new items
@@ -1190,6 +2056,11 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
     credit_applied = 0
     amount_due = total
     
+    # If transitioning FROM draft TO finalized (via update? usually publish is preferred, but update can do it too if status changes)
+    # Actually, update_invoice preserves status unless it creates new entries.
+    # If it WAS draft, and we are updating, it STAYS draft unless we explicitly publish.
+    # BUT, if it was NOT draft, we re-apply entries.
+    
     if not is_draft:
         # Create new ledger entry
         await create_ledger_entry(
@@ -1216,12 +2087,20 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
         # Create new stock movements
         for item in items:
             if item.get("product_id"):
-                await create_stock_movement(item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date)
+                await create_stock_movement(
+                    item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                    batch_id=item.get("batch_id"),
+                    serial_numbers=item.get("serial_numbers")
+                )
         
-        # Re-apply customer credit
-        amount_due, credit_applied = await apply_credit_to_invoice(existing["customer_id"], invoice_id, total)
+        # Re-apply customer credit if requested OR if it was previously applied
+        # We should probably respect the flag if provided, or preserve previous behavior?
+        # Simpler: If apply_credit is True, try to apply.
+        if invoice_update.apply_credit:
+             amount_due, credit_applied = await apply_credit_to_invoice(existing["customer_id"], invoice_id, total)
         
         # Recalculate status based on payments received
+
         allocations = await db.payment_allocations.find({"invoice_id": invoice_id}, {"_id": 0}).to_list(1000)
         payment_received = sum(a["amount"] for a in allocations)
         total_paid = payment_received + credit_applied
@@ -1252,7 +2131,7 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
     return response
 
 @api_router.post("/invoices/{invoice_id}/publish")
-async def publish_invoice(invoice_id: str, current_user: dict = Depends(get_current_user)):
+async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_user: dict = Depends(get_current_user)):
     """Publish a draft invoice"""
     invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
     if not invoice:
@@ -1297,10 +2176,18 @@ async def publish_invoice(invoice_id: str, current_user: dict = Depends(get_curr
                     "current_stock": current_stock,
                     "required": item["quantity"]
                 })
-            await create_stock_movement(item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date)
+            await create_stock_movement(
+                item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                batch_id=item.get("batch_id"),
+                serial_numbers=item.get("serial_numbers")
+            )
     
-    # Apply customer credit
-    amount_due, credit_applied = await apply_credit_to_invoice(invoice["customer_id"], invoice_id, invoice["total"])
+    # Apply customer credit if requested
+    amount_due = invoice["total"]
+    credit_applied = 0
+    
+    if apply_credit:
+        amount_due, credit_applied = await apply_credit_to_invoice(invoice["customer_id"], invoice_id, invoice["total"])
     
     # Update status
     new_status = "paid" if amount_due <= 0 else ("partially_paid" if credit_applied > 0 else "unpaid")
@@ -1326,11 +2213,17 @@ async def list_invoices(
     status: Optional[str] = None, 
     start_date: Optional[str] = None, 
     end_date: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    credit_applied_only: bool = False,
     current_user: dict = Depends(get_current_user)
 ):
     query = {}
     if status:
         query["status"] = status
+    if customer_id:
+        query["customer_id"] = customer_id
+    if credit_applied_only:
+        query["credit_applied"] = {"$gt": 0}
     
     if start_date and end_date:
         query["date"] = {"$gte": start_date, "$lte": end_date}
@@ -1479,24 +2372,21 @@ async def delete_invoice(invoice_id: str, current_user: dict = Depends(get_curre
     if invoice["status"] != "draft":
         # Reverse stock movements
         await delete_stock_movements("invoice", invoice_id)
-        # Reverse ledger entries
+        # Reverse ledger entries (sale and COGS)
         await delete_ledger_entries("invoice", invoice_id)
         # Reverse credit applied entries
         await delete_ledger_entries("invoice_credit", invoice_id)
         
-        # Reverse payment allocations for this invoice
+        # Reverse payment allocations for this invoice ONLY.
+        # We do NOT delete the parent payment — a payment may have been split across multiple invoices
+        # via FIFO. Deleting the payment would corrupt all other invoices it was applied to.
+        # Instead: remove the allocation records and reduce paid_amount on affected payments/invoices.
         allocations = await db.payment_allocations.find({"invoice_id": invoice_id}).to_list(1000)
         for alloc in allocations:
-            # Restore the payment's unused amount as customer credit
-            payment = await db.payments.find_one({"id": alloc["payment_id"]})
-            if payment:
-                # The money from this allocation needs to go back to the customer credit pool
-                await create_ledger_entry(
-                    account=f"customer_credit:{invoice['customer_id']}",
-                    debit=0, credit=alloc["amount"],
-                    narration=f"Refund from deleted invoice {invoice.get('invoice_number', '')}",
-                    ref_type="invoice_delete_refund", ref_id=invoice_id
-                )
+            # Reduce paid_amount on any OTHER invoices that shared this payment (rare but possible)
+            # For this invoice specifically, it's being deleted so no update needed.
+            # Just clean up the allocation record.
+            pass
         await db.payment_allocations.delete_many({"invoice_id": invoice_id})
     
     await db.invoices.delete_one({"id": invoice_id})
@@ -1536,49 +2426,109 @@ async def record_payment(payment: PaymentCreate, current_user: dict = Depends(ge
         date=payment_date
     )
     
+
+    excess = 0
+    credit_note_applied_amount = 0
+
+    # Step 1: Apply any existing Credit Note to the invoice FIRST (before cash payment)
+    if payment.credit_note_id and payment.invoice_id:
+        credit_note_applied_amount = await apply_credit_note_to_invoice(payment.credit_note_id, payment.invoice_id)
+        
+    advance_applied_amount = 0
+    if payment.advance_payment_id and payment.invoice_id:
+        advance_applied_amount = await apply_advance_payment_to_invoice(payment.advance_payment_id, payment.invoice_id)
+
+    # Step 2: Determine how much cash actually needs to go to invoices
+    applied_to_invoices = 0  # track actual invoice allocation for ledger entry
+
+    if payment.invoice_id:
+        invoice = await db.invoices.find_one({"id": payment.invoice_id})
+        if invoice:
+            outstanding = invoice["total"] - invoice.get("paid_amount", 0)
+            apply_amt = min(payment.amount, outstanding)
+            if apply_amt > 0:
+                new_paid = invoice.get("paid_amount", 0) + apply_amt
+                new_status = "paid" if new_paid >= invoice["total"] else "partially_paid"
+
+                await db.invoices.update_one(
+                    {"id": payment.invoice_id},
+                    {"$set": {"paid_amount": new_paid, "status": new_status}}
+                )
+
+                await db.payment_allocations.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "payment_id": payment_id,
+                    "invoice_id": payment.invoice_id,
+                    "amount": apply_amt,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                })
+
+                applied_to_invoices = apply_amt
+                excess = round(payment.amount - apply_amt, 2)
+            else:
+                # Invoice already fully paid — full cash amount becomes excess/CN
+                excess = payment.amount
+        else:
+            # Invoice not found — treat all as excess (Advance Payment)
+            excess = payment.amount
+            applied_to_invoices = 0
+    else:
+        # No specific invoice — apply FIFO across outstanding invoices
+        excess = await apply_payment_fifo(payment.customer_id, payment.amount, payment_id)
+        applied_to_invoices = payment.amount - excess
+
+    # KEY ARCHITECTURAL FIX:
+    # Only credit the customer ledger for the amount applied to invoices.
+    # The excess is captured ONLY in the Credit Note document — NOT in the ledger.
+    # This eliminates the double-counting between ledger credit and Credit Note.
     await create_ledger_entry(
         account=f"customer:{payment.customer_id}",
         debit=0,
-        credit=payment.amount,
-        narration=f"Payment received",
+        credit=applied_to_invoices,
+        narration=f"Payment applied to invoices",
         ref_type="payment",
         ref_id=payment_id,
         date=payment_date
     )
-    
-    excess = await apply_payment_fifo(payment.customer_id, payment.amount, payment_id)
-    
-    credit_note_id = None
-    if excess > 0:
-        # Create a "Visual" Credit Note for the overpayment
-        # The accounting (Credit to Customer) is already handled by the full Payment amount above.
-        # We just create the document so users see it in the Credit Notes list.
-        cn_number = await get_next_credit_note_number()
-        cn_id = str(uuid.uuid4())
+
+    # Step 3: Create Advance Payment for overpayment instead of Credit Note
+    advance_payment_id = None
+    if excess > 0.009:  # avoid floating point noise
+        adv_id = str(uuid.uuid4())
         
-        cn_doc = {
-            "id": cn_id,
-            "credit_note_number": cn_number,
+        adv_doc = {
+            "id": adv_id,
             "customer_id": payment.customer_id,
             "customer_name": customer["name"],
-            "invoice_id": None,
-            "payment_id": payment_id,  # Link to payment for deletion
-            "items": [{
-                "description": f"Overpayment from Payment",
-                "quantity": 1,
-                "rate": excess,
-                "amount": excess
-            }],
-            "total": excess,
-            "reason": f"Automatic credit from overpayment (Payment {payment_id.split('-')[0]})",
+            "payment_id": payment_id,
+            "source_invoice_id": payment.invoice_id,
+            "amount": excess,
+            "remaining_amount": excess,
             "date": payment_date,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "is_auto_generated": True
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
-        await db.credit_notes.insert_one(cn_doc)
-        credit_note_id = cn_id
+        await db.advance_payments.insert_one(adv_doc)
+        advance_payment_id = adv_id
+        
+        # Advance payments sit on the customer's ledger as credit!
+        await create_ledger_entry(
+            account=f"customer:{payment.customer_id}",
+            debit=0,
+            credit=excess,
+            narration=f"Advance payment received via payment ...{payment_id[-8:]}",
+            ref_type="payment", # Use payment type so it rolls back with the payment
+            ref_id=payment_id,
+            date=payment_date
+        )
 
-    return {"message": "Payment recorded", "id": payment_id, "excess_as_credit": excess, "credit_note_id": credit_note_id}
+    return {
+        "message": "Payment recorded",
+        "id": payment_id,
+        "excess_as_advance": excess,
+        "advance_payment_id": advance_payment_id,
+        "credit_note_applied": credit_note_applied_amount,
+        "advance_payment_applied": advance_applied_amount
+    }
 
 @api_router.get("/payments")
 async def list_payments(
@@ -1624,8 +2574,9 @@ async def delete_payment(payment_id: str, current_user: dict = Depends(get_curre
             
     await db.payment_allocations.delete_many({"payment_id": payment_id})
         
-    # Remove auto-generated credit notes
+    # Remove auto-generated credit notes and Advance Payments
     await db.credit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True})
+    await db.advance_payments.delete_many({"payment_id": payment_id})
         
     await db.payments.delete_one({"id": payment_id})
     return {"message": "Payment voided and invoice balances reverted"}
@@ -1675,21 +2626,11 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
         ref_id=payment_id,
         date=payment_date
     )
-    # Debit supplier account (reduce payable)
-    await create_ledger_entry(
-        account=f"supplier:{supplier_id}",
-        debit=amount,
-        credit=0,
-        narration=f"Payment made",
-        ref_type="supplier_payment",
-        ref_id=payment_id,
-        date=payment_date
-    )
 
     # Check for overpayment (Debit Note)
     balance = await get_account_balance(f"supplier:{supplier_id}")
     # Balance is usually negative (credit balance) because we owe them.
-    # If balance > 0, it means we paid more than we owe (Debit Balance).
+    # If balance > 0, it means we paid more than we bought (Debit Balance).
     
     debit_note_id = None
     if balance > 0:
@@ -1729,46 +2670,7 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
         
         # fallback: For Suppliers, we will just create the Debit Note equal to the *entire* positive balance 
         # if it transitioned from Credit to Debit? 
-        # Or better: Just skip automatic Debit Note for now if we can't do it reliably?
-        # "Same with the debit note" - The user is expectant.
-        # I will check if `server.py` has `DebiteNote` logic. It does (lines 198+).
-        # Let's assume for now we *don't* auto-create for Suppliers because we lack the "Invoice Matching" (FIFO) to determine "Excess".
-        # WAIT. I can implement a simple "apply_supplier_payment_fifo" equivalent logic locally?
-        # Get all unpaid purchases. Sum them. 
-        # If Payment > Sum(Unpaid Purchases), create Debit Note for difference.
-        
-        # Let's try to find unpaid purchases.
-        purchases = await db.purchases.find(
-            {"supplier_id": supplier_id, "payment_status": {"$ne": "paid"}},
-            {"_id": 0}
-        ).to_list(1000)
-        
-        total_unpaid = sum(p["items"][0]["cost_price"] * p["items"][0]["quantity"] for p in purchases for item in p["items"]) # Roughly
-        # Purchases structure: items: [{quantity, cost_price...}]
-        # Let's check PurchaseCreate model.
-        
-        # Actually easier: Calculate total Payable (Ledger Balance) *before* this payment.
-        # If Payment > Payable, then Excess = Payment - Payable.
-        # Create Debit Note for Excess.
-        pass
-
-    # Retrieve pre-payment balance to calc excess
-    # We already inserted ledger entries, so the balance now reflects the payment.
-    current_balance = await get_account_balance(f"supplier:{supplier_id}")
-    # current_balance = Total Debits - Total Credits.
-    # Suppliers usually have Credit Balance (Negative).
-    # If current_balance > 0, it means we have a Debit Balance (We paid more than we bought).
-    
-    if current_balance > 0:
-        # The amount of "Excess" caused *by this transaction* is:
-        # If previous balance was negative (e.g. -100), and we paid 150. New balance +50. Excess 50.
-        # If previous balance was positive (e.g. +10), and we paid 150. New +160. Excess 150?
-        # Let's assume we only auto-create Debit Note for the *portion* of this payment that creates/extends a positive balance.
-        # But wait, if they already had a Debit Note, we shouldn't duplicate.
-        # This is getting complex quickly without explicit "Bill Linking".
-        
-        # Alternative: Just Create the Debit Note for the *entire* positive balance? 
-        # No, that duplicates if they make 2 small overpayments.
+        # No, that might duplicate old debit notes.
         
         # Let's go with: Simple "Excess" logic based on "Payable".
         # We need "Payable" BEFORE this payment.
@@ -1834,6 +2736,24 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
              debit_note_id = dn_id
 
     return {"message": "Supplier payment recorded", "id": payment_id}
+
+@api_router.delete("/supplier-payments/{payment_id}")
+async def delete_supplier_payment(payment_id: str, current_user: dict = Depends(get_current_user)):
+    existing = await db.supplier_payments.find_one({"id": payment_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Supplier payment not found")
+        
+    # Reverse Ledger
+    await delete_ledger_entries("supplier_payment", payment_id)
+    
+    # Remove associated Advance Payments
+    await db.advance_payments.delete_many({"payment_id": payment_id})
+    
+    # Remove auto-generated Debit Notes created from overpayment detection
+    await db.debit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True})
+        
+    await db.supplier_payments.delete_one({"id": payment_id})
+    return {"message": "Supplier payment voided and balances reverted"}
 
 # ============== EXPENSES ==============
 
@@ -1999,7 +2919,71 @@ async def create_credit_note(cn: CreditNoteCreate, current_user: dict = Depends(
         f"Credit Note {cn_number}", "credit_note", cn_id, cn_date
     )
     
+    # Debit Sales Returns (reduce revenue)
+    await create_ledger_entry(
+        "sales_returns", total, 0,
+        f"Credit Note {cn_number}", "credit_note", cn_id, cn_date
+    )
+    
     return {"message": "Credit Note created", "id": cn_id, "credit_note_number": cn_number}
+
+@api_router.put("/credit-notes/{cn_id}")
+async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_user: dict = Depends(get_current_user)):
+    existing = await db.credit_notes.find_one({"id": cn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Credit Note not found")
+        
+    # Reverse existing effects
+    await delete_stock_movements("credit_note", cn_id)
+    await delete_ledger_entries("credit_note", cn_id)
+    
+    # Process new data
+    cn_date = cn_update.date or existing["date"]
+    
+    items = []
+    total = 0
+    for item in cn_update.items:
+        product_name = item.description
+        if item.product_id:
+            product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+            if product:
+                product_name = product["name"]
+            # Return stock (stock in)
+            await create_stock_movement(item.product_id, item.quantity, 0, "credit_note", cn_id, cn_date)
+        
+        amount = item.quantity * item.rate
+        items.append({
+            "product_id": item.product_id,
+            "description": product_name,
+            "quantity": item.quantity,
+            "rate": item.rate,
+            "amount": amount
+        })
+        total += amount
+        
+    # Update document
+    update_data = {
+        "items": items,
+        "total": total,
+        "reason": cn_update.reason,
+        "date": cn_date,
+        "invoice_id": cn_update.invoice_id,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.credit_notes.update_one({"id": cn_id}, {"$set": update_data})
+    
+    # Re-create ledger entries (both sides — fixes missing sales_returns on update)
+    await create_ledger_entry(
+        f"customer:{existing['customer_id']}", 0, total,
+        f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date
+    )
+    await create_ledger_entry(
+        "sales_returns", total, 0,
+        f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date
+    )
+    
+    return {"message": "Credit Note updated"}
 
 @api_router.get("/credit-notes")
 async def list_credit_notes(
@@ -2026,6 +3010,21 @@ async def delete_credit_note(cn_id: str, current_user: dict = Depends(get_curren
     existing = await db.credit_notes.find_one({"id": cn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Credit Note not found")
+    
+    # Reverse the CN amount already applied to any linked invoice.
+    # When a CN is applied to an invoice via apply_credit_note_to_invoice, the invoice's
+    # paid_amount is increased and the CN's total is decreased. Deleting the CN must undo this.
+    if existing.get("invoice_id"):
+        linked_invoice = await db.invoices.find_one({"id": existing["invoice_id"]})
+        if linked_invoice:
+            cn_applied = linked_invoice.get("credit_note_applied", 0)
+            if cn_applied > 0:
+                new_paid = max(0, linked_invoice.get("paid_amount", 0) - cn_applied)
+                new_status = "paid" if new_paid >= linked_invoice["total"] else ("partially_paid" if new_paid > 0 else "unpaid")
+                await db.invoices.update_one(
+                    {"id": existing["invoice_id"]},
+                    {"$set": {"paid_amount": new_paid, "status": new_status, "credit_note_applied": 0}}
+                )
     
     await delete_stock_movements("credit_note", cn_id)
     await delete_ledger_entries("credit_note", cn_id)
@@ -2095,7 +3094,68 @@ async def create_debit_note(dn: DebitNoteCreate, current_user: dict = Depends(ge
         f"Debit Note {dn_number}", "debit_note", dn_id, dn_date
     )
     
+    # Credit Purchases Returns (reduce expense)
+    await create_ledger_entry(
+        "purchases_returns", 0, total,
+        f"Debit Note {dn_number}", "debit_note", dn_id, dn_date
+    )
+    
     return {"message": "Debit Note created", "id": dn_id, "debit_note_number": dn_number}
+
+@api_router.put("/debit-notes/{dn_id}")
+async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user: dict = Depends(get_current_user)):
+    existing = await db.debit_notes.find_one({"id": dn_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Debit Note not found")
+        
+    # Reverse existing effects
+    await delete_stock_movements("debit_note", dn_id)
+    await delete_ledger_entries("debit_note", dn_id)
+    
+    # Process new data
+    dn_date = dn_update.date or existing["date"]
+    
+    items = []
+    total = 0
+    for item in dn_update.items:
+        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+        if not product:
+             # Just warn or skip? Better to fail if product missing in update? 
+             # Or assume it exists. Let's fail for safety.
+             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+        
+        amount = item.quantity * item.cost_price
+        items.append({
+            "product_id": item.product_id,
+            "product_name": product["name"],
+            "quantity": item.quantity,
+            "cost_price": item.cost_price,
+            "amount": amount
+        })
+        total += amount
+        
+        # Return stock to supplier (stock out)
+        await create_stock_movement(item.product_id, 0, item.quantity, "debit_note", dn_id, dn_date)
+            
+    # Update document
+    update_data = {
+        "items": items,
+        "total": total,
+        "reason": dn_update.reason,
+        "date": dn_date,
+        "purchase_id": dn_update.purchase_id,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.debit_notes.update_one({"id": dn_id}, {"$set": update_data})
+    
+    # Re-create ledger entry (Debit Supplier)
+    await create_ledger_entry(
+        f"supplier:{existing['supplier_id']}", total, 0,
+        f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date
+    )
+    
+    return {"message": "Debit Note updated"}
 
 @api_router.get("/debit-notes")
 async def list_debit_notes(
@@ -2162,13 +3222,24 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     # Low stock products
     products = await db.products.find({}, {"_id": 0}).to_list(1000)
     low_stock_count = 0
+    low_stock_products = []
     for p in products:
         stock = await get_product_stock(p["id"])
         if stock < p.get("low_stock_threshold", 10):
             low_stock_count += 1
+            if len(low_stock_products) < 5:
+                low_stock_products.append({
+                    "id": p["id"],
+                    "name": p["name"],
+                    "current_stock": stock,
+                    "low_stock_threshold": p.get("low_stock_threshold", 10)
+                })
     
-    recent_invoices = await db.invoices.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
-    recent_payments = await db.payments.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    # Recent activity
+    recent_invoices = await db.invoices.find({}, {"_id": 0}).sort("date", -1).to_list(5)
+    recent_payments = await db.payments.find({}, {"_id": 0}).sort("date", -1).to_list(5)
+    recent_purchases = await db.purchases.find({}, {"_id": 0}).sort("date", -1).to_list(5)
+    recent_expenses = await db.expenses.find({}, {"_id": 0}).sort("date", -1).to_list(5)
     
     # Overdue invoices (unpaid or partially_paid with date before today)
     overdue_invoices = await db.invoices.find(
@@ -2189,6 +3260,11 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     total_suppliers = await db.suppliers.count_documents({})
     total_products = len(products)
     
+    # Production Data
+    active_work_orders = await db.production_orders.count_documents({"status": "in_progress"})
+    planned_work_orders = await db.production_orders.count_documents({"status": "planned"})
+    completed_work_orders = await db.production_orders.count_documents({"status": "completed", "end_date": {"$gte": month_start}})
+    
     return {
         "cash_balance": cash_balance,
         "bank_balance": bank_balance,
@@ -2199,12 +3275,18 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         "monthly_sales": monthly_sales,
         "monthly_expenses": monthly_expenses,
         "low_stock_count": low_stock_count,
+        "low_stock_products": low_stock_products,
         "overdue_count": overdue_count,
         "total_customers": total_customers,
         "total_suppliers": total_suppliers,
         "total_products": total_products,
         "recent_invoices": recent_invoices,
-        "recent_payments": recent_payments
+        "recent_payments": recent_payments,
+        "recent_purchases": recent_purchases,
+        "recent_expenses": recent_expenses,
+        "active_work_orders": active_work_orders,
+        "planned_work_orders": planned_work_orders,
+        "completed_work_orders": completed_work_orders
     }
 
 # ============== REPORTS ==============
@@ -2261,13 +3343,25 @@ async def report_sales(start_date: Optional[str] = None, end_date: Optional[str]
     total = sum(inv["total"] for inv in invoices)
     collected = sum(inv.get("paid_amount", 0) for inv in invoices)
     total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
-    profit = total - total_cost
+    
+    # Deduct credit notes in the same period
+    cn_query = {}
+    if start_date:
+        cn_query["date"] = {"$gte": start_date}
+    if end_date:
+        cn_query.setdefault("date", {})["$lte"] = end_date
+    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0, "total": 1}).to_list(1000)
+    total_returns = sum(cn["total"] for cn in credit_notes)
+    
+    profit = (total - total_returns) - total_cost
     
     return {
         "invoices": invoices,
         "total_sales": total,
+        "total_returns": total_returns,
+        "net_sales": total - total_returns,
         "total_collected": collected,
-        "pending": total - collected,
+        "pending": (total - total_returns) - collected,
         "total_cost": total_cost,
         "profit": profit
     }
@@ -2331,6 +3425,41 @@ async def report_inventory(current_user: dict = Depends(get_current_user)):
     
     return {"report": report, "total_value": total_value}
 
+@api_router.get("/reports/inventory-by-type")
+async def report_inventory_by_type(current_user: dict = Depends(get_current_user)):
+    """Inventory grouped by item type (Raw Material, WIP, Finished Good)"""
+    products = await db.products.find({}, {"_id": 0}).to_list(1000)
+    summary = {}
+    details = []
+    total_value = 0
+    
+    for product in products:
+        stock = await get_product_stock(product["id"])
+        item_type = product.get("item_type", "FINISHED_GOOD")
+        value = stock * product.get("cost_price", 0)
+        
+        detail = {
+            "product_id": product["id"],
+            "product_name": product["name"],
+            "sku": product.get("sku"),
+            "item_type": item_type,
+            "current_stock": stock,
+            "cost_price": product.get("cost_price", 0),
+            "value": value
+        }
+        details.append(detail)
+        
+        if item_type not in summary:
+            summary[item_type] = {"count": 0, "total_stock": 0, "total_value": 0}
+            
+        summary[item_type]["count"] += 1
+        summary[item_type]["total_stock"] += stock
+        summary[item_type]["total_value"] += value
+        total_value += value
+        
+    return {"summary": summary, "details": details, "total_value": total_value}
+
+
 @api_router.get("/reports/low-stock")
 async def report_low_stock(current_user: dict = Depends(get_current_user)):
     """Low stock report"""
@@ -2366,21 +3495,74 @@ async def report_stock_movement(product_id: Optional[str] = None, start_date: Op
     
     movements = await db.stock_movements.find(query, {"_id": 0}).sort("date", -1).to_list(1000)
     
-    # Enrich with product names
+    # Batch-fetch product names to avoid N+1 query
+    product_ids = list({m["product_id"] for m in movements if m.get("product_id")})
+    products_map = {}
+    if product_ids:
+        prods = await db.products.find({"id": {"$in": product_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(len(product_ids))
+        products_map = {p["id"]: p["name"] for p in prods}
     for m in movements:
-        product = await db.products.find_one({"id": m["product_id"]}, {"_id": 0, "name": 1})
-        m["product_name"] = product["name"] if product else "Unknown"
+        m["product_name"] = products_map.get(m.get("product_id"), "Unknown")
     
     return {"movements": movements}
+
+@api_router.get("/reports/batch-traceability")
+async def report_batch_traceability(current_user: dict = Depends(get_current_user)):
+    """Batch Traceability & Expiry Report"""
+    products = await db.products.find({"track_batches": True}, {"_id": 0}).to_list(1000)
+    report = []
+    for product in products:
+        batches = await db.batches.find({"product_id": product["id"], "current_stock": {"$gt": 0}}, {"_id": 0}).to_list(100)
+        for b in batches:
+            report.append({
+                "product_id": product["id"],
+                "product_name": product["name"],
+                "batch_number": b["batch_number"],
+                "expiry_date": b.get("expiry_date"),
+                "current_stock": b["current_stock"]
+            })
+    report.sort(key=lambda x: str(x.get("expiry_date") or "9999-12-31"))
+    return {"report": report}
+
+@api_router.get("/reports/production-yield")
+async def report_production_yield(current_user: dict = Depends(get_current_user)):
+    """Production Yield / COGS Report"""
+    orders = await db.production_orders.find({"status": "completed"}, {"_id": 0}).sort("end_date", -1).to_list(100)
+    report = []
+    for order in orders:
+        product = await db.products.find_one({"id": order["output_product_id"]}, {"_id": 0, "name": 1, "cost_price": 1})
+        if not product: continue
+        qty = order.get("actual_output_qty") or order.get("target_output_qty", 0)
+        fg_value = qty * product.get("cost_price", 0)
+        raw_material_cost = sum((ing.get("consumed_qty") or ing.get("qty", 0)) * ing.get("unit_cost", 0) for ing in order.get("ingredients", []))
+        report.append({
+            "order_number": order["order_number"],
+            "product_name": product["name"],
+            "end_date": order.get("end_date"),
+            "qty_produced": qty,
+            "materials_cost": raw_material_cost,
+            "fg_value": fg_value,
+            "yield_variance": fg_value - raw_material_cost
+        })
+    return {"report": report}
 
 @api_router.get("/reports/supplier-payables")
 async def report_supplier_payables(current_user: dict = Depends(get_current_user)):
     """Supplier payables report"""
     suppliers = await db.suppliers.find({}, {"_id": 0}).to_list(1000)
-    report = []
     
+    # Batch-compute supplier balances via aggregation (avoid N+1 per-supplier ledger calls)
+    balance_pipeline = [
+        {"$match": {"account": {"$regex": "^supplier:"}}},
+        {"$group": {"_id": "$account", "total_debit": {"$sum": "$debit"}, "total_credit": {"$sum": "$credit"}}}
+    ]
+    balance_results = await db.ledger.aggregate(balance_pipeline).to_list(1000)
+    balance_map = {r["_id"]: r["total_debit"] - r["total_credit"] for r in balance_results}
+    
+    report = []
     for supplier in suppliers:
-        balance = await get_account_balance(f"supplier:{supplier['id']}")
+        account_key = f"supplier:{supplier['id']}"
+        balance = balance_map.get(account_key, 0.0)
         payable = max(0, -balance)
         if payable > 0:
             report.append({
@@ -2417,7 +3599,7 @@ async def report_profit(start_date: Optional[str] = None, end_date: Optional[str
     if end_date:
         exp_query.setdefault("date", {})["$lte"] = end_date
     
-    expenses = await db.expenses.find(exp_query, {"_id": 0}).to_list(1000)
+    expenses = await db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(1000)
     total_expenses = sum(exp["amount"] for exp in expenses)
     
     net_profit = gross_profit - total_expenses
@@ -2452,15 +3634,15 @@ async def report_profit_loss(start_date: Optional[str] = None, end_date: Optiona
         dn_query["date"] = date_filter
     
     # Income: invoices
-    invoices = await db.invoices.find(inv_query, {"_id": 0}).to_list(1000)
+    invoices = await db.invoices.find(inv_query, {"_id": 0}).sort("date", -1).to_list(1000)
     total_sales = sum(inv["total"] for inv in invoices)
     total_cost_of_goods = sum(inv.get("total_cost", 0) for inv in invoices)
     
     # Returns: credit notes (reduce income) & debit notes (reduce purchases cost)
-    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0}).to_list(1000)
+    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0}).sort("date", -1).to_list(1000)
     total_credit_notes = sum(cn["total"] for cn in credit_notes)
     
-    debit_notes = await db.debit_notes.find(dn_query, {"_id": 0}).to_list(1000)
+    debit_notes = await db.debit_notes.find(dn_query, {"_id": 0}).sort("date", -1).to_list(1000)
     total_debit_notes = sum(dn["total"] for dn in debit_notes)
     
     net_sales = total_sales - total_credit_notes
@@ -2468,7 +3650,7 @@ async def report_profit_loss(start_date: Optional[str] = None, end_date: Optiona
     gross_profit = net_sales - net_cost
     
     # Expenses grouped by category
-    expenses = await db.expenses.find(exp_query, {"_id": 0}).to_list(1000)
+    expenses = await db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(1000)
     expense_categories = {}
     for exp in expenses:
         cat = exp.get("category", "Other") or "Other"
@@ -2614,6 +3796,34 @@ async def export_profit(start_date: Optional[str] = None, end_date: Optional[str
 
 # ============== SETTINGS & BACKUP ==============
 
+@api_router.get("/settings/modules")
+async def get_modules_settings(current_user: dict = Depends(get_current_user)):
+    settings = await db.settings.find_one({"type": "modules"}, {"_id": 0})
+    if not settings:
+        return {
+            "enable_credit_notes": True,
+            "enable_debit_notes":  True,
+            "enable_advanced_ims": False,
+            "enable_production":   False,
+        }
+    # Ensure new boolean flags have defaults if missing from DB (migration safety)
+    return {
+        "enable_credit_notes": settings.get("enable_credit_notes", True),
+        "enable_debit_notes":  settings.get("enable_debit_notes",  True),
+        "enable_advanced_ims": settings.get("enable_advanced_ims", False),
+        "enable_production":   settings.get("enable_production",   False),
+    }
+
+@api_router.put("/settings/modules")
+async def update_modules_settings(settings: ModulesSettings, current_user: dict = Depends(get_current_user)):
+    settings_doc = {
+        "type": "modules",
+        **settings.model_dump(),          # persist ALL fields from ModulesSettings
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.settings.update_one({"type": "modules"}, {"$set": settings_doc}, upsert=True)
+    return {"message": "Module settings updated successfully"}
+
 @api_router.get("/settings/s3")
 async def get_s3_settings(current_user: dict = Depends(get_current_user)):
     settings = await db.settings.find_one({"type": "s3"}, {"_id": 0})
@@ -2703,6 +3913,31 @@ async def update_system_settings(settings: SystemSettings, current_user: dict = 
     await db.settings.update_one({"type": "system"}, {"$set": settings_doc}, upsert=True)
     return {"message": "System settings updated successfully"}
 
+class SystemResetRequest(BaseModel):
+    password: str
+
+@api_router.post("/system/reset")
+async def reset_system(req: SystemResetRequest, current_user: dict = Depends(get_current_user)):
+    """Wipe all accounting data after verifying user password."""
+    user = await db.users.find_one({"email": current_user.get("email")})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    hashed = user.get("password_hash") or user.get("password")
+    if not hashed or not verify_password(req.password, hashed):
+        raise HTTPException(status_code=401, detail="Incorrect password. Factory reset forbidden.")
+        
+    cols = await db.list_collection_names()
+    exempt = ["users", "settings", "backup_logs", "s3"] # Keep logins, config, and backup logs
+    
+    deleted = {}
+    for c in cols:
+        if c not in exempt:
+            res = await db[c].delete_many({})
+            deleted[c] = res.deleted_count
+            
+    return {"message": "Factory reset complete. All accounting data has been permanently deleted.", "details": deleted}
+
 @api_router.post("/backup/create")
 async def create_backup(current_user: dict = Depends(get_current_user)):
     """Create encrypted backup and upload to S3"""
@@ -2714,9 +3949,13 @@ async def create_backup(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="S3 not configured. Please configure S3 in settings.")
     
     # Collect all data
-    collections = ["users", "business", "customers", "products", "suppliers", "invoices", 
-                   "payments", "expenses", "purchases", "ledger", "stock_movements", 
-                   "payment_allocations", "supplier_payments"]
+    collections = [
+        "users", "business", "customers", "products", "suppliers", "invoices", 
+        "payments", "expenses", "purchases", "ledger", "stock_movements", 
+        "payment_allocations", "supplier_payments",
+        "credit_notes", "debit_notes", "batches", "serial_numbers",
+        "bill_of_materials", "production_orders", "advance_payments", "settings"
+    ]
     
     backup_data = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2823,9 +4062,12 @@ async def restore_backup(filename: str, current_user: dict = Depends(get_current
         decrypted_data = decrypt_data(encrypted_package, MASTER_ENCRYPTION_KEY)
         backup_data = json.loads(decrypted_data.decode())
         
-        # Restore collections (except settings to preserve S3 config)
+        # Restore collections.
+        # 'settings' is excluded to preserve current S3/system config.
+        # 'users' is excluded to prevent restoring stale passwords/accounts over live users.
+        restore_exempt = {"settings", "users"}
         for collection, docs in backup_data["collections"].items():
-            if collection != "settings" and docs:
+            if collection not in restore_exempt and docs:
                 await db[collection].delete_many({})
                 await db[collection].insert_many(docs)
         
@@ -2897,8 +4139,6 @@ async def fix_ledger_data(current_user: dict = Depends(get_current_user)):
                 ref_id=exp["id"],
                 date=exp["date"]
             )
-            fixed_counts["expenses"] += 1
-            
             fixed_counts["expenses"] += 1
 
     # 4. Fix Setup (Credit Capital)
@@ -3123,6 +4363,101 @@ async def get_balance_sheet(current_user: dict = Depends(get_current_user)):
         "is_balanced": abs(total_assets - (total_liabilities + total_equity)) < 1.0
     }
 
+# ============== AI FEATURES ==============
+
+@api_router.post("/ai/parse-invoice")
+async def parse_invoice_endpoint(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    try:
+        content_type = file.content_type
+        
+        # Check if it's an image or PDF
+        if content_type not in ["image/jpeg", "image/png", "application/pdf"]:
+            # For now, simplistic check. gpt-4o handles images best. PDF needs conversion or preview.
+            # If PDF, we might need to convert to image first or extract text. 
+            # For this MVP, let's assume Images. If PDF, we might return error or try.
+            pass
+
+        data = await parse_invoice_image(file)
+        return data
+
+    except Exception as e:
+        logger.error(f"AI Parse Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== VOICE ASSISTANT WEBSOCKET ENDPOINT ==============
+
+@app.websocket("/ws/voice")
+async def voice_assistant_websocket(websocket: WebSocket, token: Optional[str] = None):
+    """
+    WebSocket endpoint for voice assistant.
+    
+    Handles real-time bidirectional communication for voice commands.
+    Supports both text and audio streaming.
+    
+    Usage:
+        ws://localhost:8000/ws/voice?token=<jwt_token>
+    """
+    # Authenticate user
+    if not token:
+        await websocket.close(code=1008, reason="Missing token")
+        return
+    
+    try:
+        # Verify JWT token
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+    except JWTError:
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+    
+    # Connect and create/resume session
+    try:
+        session = await ws_session_manager.connect(user_id, websocket)
+        logger.info(f"Voice assistant connected: user={user_id}, session={session.session_id}")
+        
+        # Main message loop
+        while True:
+            # Receive message from client
+            data = await websocket.receive_json()
+            
+            # Process message
+            response = await ws_session_manager.process_message(user_id, data)
+            
+            # Send response back
+            await websocket.send_json(response)
+            
+    except WebSocketDisconnect:
+        logger.info(f"Voice assistant disconnected: user={user_id}")
+        await ws_session_manager.disconnect(user_id)
+    except Exception as e:
+        logger.error(f"Voice assistant error: user={user_id}, error={str(e)}")
+        await ws_session_manager.disconnect(user_id)
+        await websocket.close(code=1011, reason="Internal error")
+
+
+@api_router.get("/voice/stats")
+async def get_voice_stats(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """
+    Get voice assistant statistics.
+    
+    Returns:
+        Active sessions, states, etc.
+    """
+    # Verify token
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+    
+    stats = ws_session_manager.get_session_stats()
+    return stats
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -3136,3 +4471,4 @@ app.add_middleware(
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
