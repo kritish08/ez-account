@@ -5,8 +5,16 @@ const AuthContext = createContext(null);
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Set the axios header eagerly at module load so the first render's API calls
+// are authenticated. Without this, child components fetch before the
+// AuthProvider's useEffect runs and the request goes out with no token.
+const storedToken = localStorage.getItem("token");
+if (storedToken) {
+  axios.defaults.headers.common["Authorization"] = `Bearer ${storedToken}`;
+}
+
 export const AuthProvider = ({ children }) => {
-  const [token, setToken] = useState(localStorage.getItem("token"));
+  const [token, setToken] = useState(storedToken);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 

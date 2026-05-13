@@ -37,6 +37,12 @@ const EditInvoice = () => {
   }, [id]);
 
   const fetchData = async () => {
+    // Clear stale form data immediately so navigating between
+    // /invoices/A/edit -> /invoices/B/edit doesn't show A's items
+    // for a frame while B is loading.
+    setLoading(true);
+    setInvoice(null);
+    setFormData({ date: "", notes: "", items: [] });
     try {
       const [invoiceRes, productsRes] = await Promise.all([
         getInvoice(id),

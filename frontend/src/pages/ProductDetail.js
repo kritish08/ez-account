@@ -156,36 +156,44 @@ const ProductDetail = () => {
   };
 
   const printLabels = (labels) => {
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Print Labels</title>
-          <style>
-            body { font-family: monospace; display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
-            .label-card { border: 1px dashed #ccc; padding: 10px; display: flex; flex-direction: column; align-items: center; width: 140px; }
-            .label-card img { width: 120px; height: 120px; margin-bottom: 5px; }
-            .label-text { font-size: 10px; text-align: center; word-break: break-all; }
-          </style>
-        </head>
-        <body>
-          ${labels.map(l => `
-            <div class="label-card">
-              <img src="${l.qr_code}" alt="QR" />
-              <div class="label-text">
-                ${product.name.substring(0, 15)}<br/>
-                ${l.batch_id ? 'B: ' + l.batch_id + '<br/>' : ''}
-                ${l.serial_number ? 'S: ' + l.serial_number : ''}
-              </div>
-            </div>
-          `).join('')}
-        </body>
-        <script>
-          setTimeout(() => { window.print(); window.close(); }, 500);
-        </script>
-      </html>
-    `);
-    printWindow.document.close();
+    // Build the print page via a Blob URL + DOM manipulation rather than
+    // `document.write` + inline `<script>`. Strict CSPs (script-src 'self')
+    // block inline scripts in the popup, silently preventing the print
+    // dialog from opening. Also avoids document.write XSS-pattern warnings.
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    const cards = labels.map(l => `
+      <div class="label-card">
+        <img src="${esc(l.qr_code)}" alt="QR" />
+        <div class="label-text">
+          ${esc((product?.name || "").substring(0, 15))}<br/>
+          ${l.batch_id ? 'B: ' + esc(l.batch_id) + '<br/>' : ''}
+          ${l.serial_number ? 'S: ' + esc(l.serial_number) : ''}
+        </div>
+      </div>`).join('');
+    const html = `<!doctype html><html><head><title>Print Labels</title>
+      <style>
+        body { font-family: monospace; display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
+        .label-card { border: 1px dashed #ccc; padding: 10px; display: flex; flex-direction: column; align-items: center; width: 140px; }
+        .label-card img { width: 120px; height: 120px; margin-bottom: 5px; }
+        .label-text { font-size: 10px; text-align: center; word-break: break-all; }
+      </style></head><body>${cards}</body></html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const printWindow = window.open(url, '_blank');
+    if (!printWindow) {
+      URL.revokeObjectURL(url);
+      toast.error("Please allow pop-ups to print labels");
+      return;
+    }
+    // Trigger print from the opener once the popup has rendered.
+    printWindow.addEventListener('load', () => {
+      setTimeout(() => {
+        try { printWindow.print(); } catch {}
+        try { printWindow.close(); } catch {}
+        URL.revokeObjectURL(url);
+      }, 250);
+    });
   };
 
 

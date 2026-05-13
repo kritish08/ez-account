@@ -101,7 +101,11 @@ const Expenses = () => {
       .catch(() => toast.error("Failed to load expenses"))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [refreshKey, dateRange, categoryFilter, modeFilter]);
+    // categoryFilter and modeFilter are applied client-side later in the
+    // render, so changing them does NOT need a re-fetch. Including them
+    // in the dep array previously made every filter click trigger a network
+    // round-trip that returned identical data.
+  }, [refreshKey, dateRange]);
 
   const resetForm = () => {
     setFormData({

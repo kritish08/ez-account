@@ -90,8 +90,8 @@ const ProductionOrders = () => {
     fetchData();
   }, [fetchData]);
 
-  const finishedGoods = products.filter(p => p.item_type === "FINISHED_GOOD" || !p.item_type);
-  const rawMaterials = products.filter(p => p.item_type === "RAW_MATERIAL" || p.item_type === "SEMI_FINISHED");
+  const finishedGoods = products.filter(p => p.item_type === "finished_good" || !p.item_type);
+  const rawMaterials = products.filter(p => p.item_type === "raw_material" || p.item_type === "wip");
 
   const handleProductSelect = async (productId) => {
     setFormData(prev => ({ ...prev, product_id: productId }));

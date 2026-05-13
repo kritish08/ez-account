@@ -74,6 +74,7 @@ const Login = () => {
                 onChange={(e) => setEmail(e.target.value)}
                 data-testid="login-email-input"
                 className="h-11"
+                autoComplete="email"
               />
             </div>
 
@@ -88,6 +89,7 @@ const Login = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   data-testid="login-password-input"
                   className="h-11 pr-10"
+                  autoComplete="current-password"
                 />
                 <button
                   type="button"

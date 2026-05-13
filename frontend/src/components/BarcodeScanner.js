@@ -12,6 +12,15 @@ const BarcodeScanner = ({ open, onScan, onClose }) => {
   const [started, setStarted] = useState(false);
   const mounted = useRef(false);
 
+  // Keep `onScan` in a ref so the scan callback always calls the latest
+  // version, regardless of how often the parent re-renders. The previous
+  // code captured `onScan` in `useCallback([onScan, stopScanner])` and only
+  // re-bound the scanner when `onScan` changed identity — so a parent that
+  // re-rendered with a new inline handler would see the scan fire with the
+  // first-render handler instead of the current one.
+  const onScanRef = useRef(onScan);
+  useEffect(() => { onScanRef.current = onScan; }, [onScan]);
+
   const stopScanner = useCallback(async () => {
     if (html5QrcodeRef.current) {
       try {
@@ -55,7 +64,7 @@ const BarcodeScanner = ({ open, onScan, onClose }) => {
         },
         (decodedText) => {
           if (mounted.current) {
-            stopScanner().then(() => onScan(decodedText));
+            stopScanner().then(() => onScanRef.current?.(decodedText));
           }
         },
         () => {
@@ -77,7 +86,7 @@ const BarcodeScanner = ({ open, onScan, onClose }) => {
       }
       html5QrcodeRef.current = null;
     }
-  }, [onScan, stopScanner]);
+  }, [stopScanner]);
 
   useEffect(() => {
     mounted.current = true;

@@ -170,18 +170,20 @@ const RawMaterials = () => {
   };
 
   const confirmDelete = async () => {
-    // Optimistic delete
-    setProducts((prev) => prev.filter((p) => p.id !== productToDelete.id));
-    setDeleteDialogOpen(false);
+    // Pessimistic delete: wait for the server, only update local state on
+    // success. Previous code optimistically removed the row first; if the
+    // network or server was down, the row stayed gone in the UI until a
+    // refresh happened to succeed.
     const deleted = productToDelete;
+    setDeleteDialogOpen(false);
     setProductToDelete(null);
     try {
       await deleteProduct(deleted.id);
+      setProducts((prev) => prev.filter((p) => p.id !== deleted.id));
       toast.success("Product deleted successfully");
       refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to delete product");
-      refresh();
     }
   };
 

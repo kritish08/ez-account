@@ -45,19 +45,32 @@ const VoiceAssistantInner = () => {
             return;
         }
 
-        const wsUrl = `ws://localhost:8000/ws/voice?token=${token}`;
+        // Build WS URL from the backend HTTP URL (env-driven, no hardcoded host).
+        // Token is sent via the first WebSocket message, NOT as a URL query
+        // param, so it doesn't leak into proxy access logs / browser history.
+        const httpBase = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+        const wsUrl = httpBase.replace(/^http/, 'ws') + '/ws/voice';
         ws.current = new WebSocket(wsUrl);
 
         ws.current.onopen = () => {
-            console.log('✅ WebSocket connected');
-            setIsConnected(true);
+            console.log('✅ WebSocket open — sending auth');
+            ws.current.send(JSON.stringify({ type: 'auth', token }));
         };
 
         ws.current.onmessage = (event) => {
             const data = JSON.parse(event.data);
             console.log('📨 Received:', data);
 
-            if (data.type === 'connected') {
+            if (data.type === 'auth_required') {
+                // Server prompted for auth — already sent in onopen; nothing to do.
+                return;
+            } else if (data.type === 'auth_failed') {
+                console.error('Voice auth failed:', data.message);
+                setIsConnected(false);
+                ws.current?.close();
+                return;
+            } else if (data.type === 'connected') {
+                setIsConnected(true);
                 setMessages([{
                     role: 'assistant',
                     content: data.message,
@@ -193,34 +206,22 @@ const VoiceAssistantInner = () => {
             };
 
             mediaRecorder.current.onstop = async () => {
-                const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
-
-                // Convert to base64 for sending (simplified for now)
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    // For now, we'll just show a placeholder message
-                    // In production, you'd send this to backend for transcription
-                    setMessages(prev => [
-                        ...prev,
-                        {
-                            role: 'user',
-                            content: '[Voice Message - Transcribing...]',
-                            timestamp: new Date()
-                        }
-                    ]);
-
-                    setIsProcessing(true);
-
-                    // TODO: Send audio to backend for transcription
-                    // For demo, simulate with a timeout
-                    setTimeout(() => {
-                        ws.current.send(JSON.stringify({
-                            type: 'text',
-                            text: 'Nayi invoice banao' // Demo text
-                        }));
-                    }, 500);
-                };
-                reader.readAsDataURL(audioBlob);
+                // Voice transcription is not yet wired end-to-end. We
+                // deliberately discard the recorded audio here rather than
+                // sending a misleading hardcoded demo string (which is what
+                // the previous implementation did — every voice command
+                // created the same dummy invoice regardless of what the user
+                // said). Surface that honestly to the user instead.
+                setMessages(prev => [
+                    ...prev,
+                    {
+                        role: 'error',
+                        content: 'Voice transcription is not yet available in this build. '
+                               + 'Please use the buttons/forms in the app, or disable Voice Assistant in Settings.',
+                        timestamp: new Date()
+                    }
+                ]);
+                setIsProcessing(false);
 
                 // Stop visualization
                 if (animationFrame.current) {
@@ -411,8 +412,12 @@ const VoiceAssistantInner = () => {
 };
 
 const VoiceAssistant = () => {
+    // Voice assistant is OFF by default until transcription is wired end-to-end.
+    // The current recording flow discards audio and was sending a hardcoded
+    // demo string — users were getting a fake-working feature. Keeping it
+    // gated behind explicit opt-in in Settings prevents shipping that façade.
     const [isEnabled, setIsEnabled] = useState(
-        () => localStorage.getItem('voiceAssistantEnabled') !== 'false'
+        () => localStorage.getItem('voiceAssistantEnabled') === 'true'
     );
 
     // Listen for settings changes from the Settings page

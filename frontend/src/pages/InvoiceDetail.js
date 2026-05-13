@@ -44,6 +44,7 @@ const InvoiceDetail = () => {
   const [downloading, setDownloading] = useState(false);
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [publishDialogOpen, setPublishDialogOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [applyCredit, setApplyCredit] = useState(false);
@@ -192,7 +193,7 @@ const InvoiceDetail = () => {
             Download PDF
           </Button>
           {invoice.attachment_url && (
-            <a href={`http://localhost:8000/api${invoice.attachment_url}`} target="_blank" rel="noopener noreferrer">
+            <a href={`${process.env.REACT_APP_BACKEND_URL}/api${invoice.attachment_url}`} target="_blank" rel="noopener noreferrer">
               <Button variant="outline">
                 <FileText className="h-4 w-4 mr-2" />
                 View Bill
@@ -222,7 +223,13 @@ const InvoiceDetail = () => {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={async () => {
+              disabled={deleting}
+              onClick={async (e) => {
+                // Prevent default close-on-click so we can hold the dialog
+                // open during the await; close only after the request resolves.
+                e.preventDefault();
+                if (deleting) return;
+                setDeleting(true);
                 try {
                   await deleteInvoice(id);
                   toast.success("Invoice deleted & effects reversed");
@@ -230,10 +237,12 @@ const InvoiceDetail = () => {
                 } catch (error) {
                   toast.error(error.response?.data?.detail || "Failed to delete invoice");
                   setDeleteDialogOpen(false);
+                } finally {
+                  setDeleting(false);
                 }
               }}
               className="bg-red-600 hover:bg-red-700"
-            >Delete</AlertDialogAction>
+            >{deleting ? "Deleting..." : "Delete"}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -392,7 +401,7 @@ const InvoiceDetail = () => {
               <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-4">Attached Bill</p>
               <div className="rounded-lg overflow-hidden border border-slate-200">
                 <img
-                  src={`http://localhost:8000/api${invoice.attachment_url}`}
+                  src={`${process.env.REACT_APP_BACKEND_URL}/api${invoice.attachment_url}`}
                   alt="Attached Bill"
                   className="w-full max-h-[600px] object-contain bg-slate-50"
                 />
