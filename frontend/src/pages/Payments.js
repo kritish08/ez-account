@@ -88,8 +88,30 @@ const Payments = () => {
   });
 
   useEffect(() => {
-    fetchData();
-  }, [dateRange]); // Added dateRange dep
+    // Cancellation guard — every other list page uses this pattern; Payments
+    // was the lone exception and would warn/setState on unmount during nav.
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setLoading(true);
+        const startDate = dateRange?.from ? dateRange.from.toISOString().split('T')[0] : null;
+        const endDate = dateRange?.to ? dateRange.to.toISOString().split('T')[0] : null;
+        const [paymentsRes, customersRes] = await Promise.all([
+          getPayments(startDate, endDate),
+          getCustomers(),
+        ]);
+        if (cancelled) return;
+        setPayments(paymentsRes.data);
+        setCustomers(customersRes.data);
+      } catch (error) {
+        if (!cancelled) toast.error("Failed to load data");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [dateRange]);
 
   const fetchData = async () => {
     try {
@@ -243,7 +265,7 @@ const Payments = () => {
 
   return (
     <div className="space-y-6 animate-fade-in" data-testid="payments-page">
-      <div className="space-y-6 animate-fade-in" data-testid="payments-page">
+      <div>
         <PageHeader
           title="Payments"
           description="Record and track customer payments"

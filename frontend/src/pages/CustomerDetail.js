@@ -42,11 +42,23 @@ const CustomerDetail = () => {
     fetchData();
   }, [id, dateRange]);
 
+  // Format a Date as YYYY-MM-DD in the user's local timezone (NOT UTC).
+  // `toISOString` would convert to UTC first; at IST (UTC+5:30) midnight local
+  // becomes 18:30 the previous day UTC, shifting the date by one — a ledger
+  // filtered "from April 1" then started from March 31.
+  const formatLocalDate = (d) => {
+    if (!d) return null;
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const start = dateRange?.from ? dateRange.from.toISOString().split("T")[0] : null;
-      const end = dateRange?.to ? dateRange.to.toISOString().split("T")[0] : null;
+      const start = formatLocalDate(dateRange?.from);
+      const end = formatLocalDate(dateRange?.to);
       const res = await getCustomerLedger(id, start, end);
       setData(res.data);
     } catch (error) {

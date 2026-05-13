@@ -7,9 +7,24 @@ All functions are based on actual database schema and API capabilities.
 
 from typing import Dict, Any, Optional, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 from datetime import datetime
 import uuid
 from .voice_session import VoiceSession, SessionState
+
+
+async def _next_seq(db: AsyncIOMotorDatabase, name: str) -> int:
+    """Atomic counter — shares the `counters` collection with the canonical
+    `_next_seq` in server.py. Both paths produce strictly unique values, so
+    the voice executor can't generate a duplicate INV/PUR number even under
+    concurrent traffic with REST callers."""
+    doc = await db.counters.find_one_and_update(
+        {"_id": name},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return doc["seq"]
 
 
 class FunctionExecutor:
@@ -265,18 +280,8 @@ class FunctionExecutor:
                 "message": "Invoice mein koi items nahi hain. Pehle items add karo"
             }
         
-        # Generate invoice number
-        last_invoice = await self.db.invoices.find_one(
-            {"invoice_number": {"$regex": "^INV-"}},
-            {"_id": 0, "invoice_number": 1},
-            sort=[("invoice_number", -1)]
-        )
-        
-        if last_invoice:
-            last_num = int(last_invoice["invoice_number"].split("-")[1])
-            invoice_number = f"INV-{last_num + 1:05d}"
-        else:
-            invoice_number = "INV-00001"
+        # Atomic invoice number (shared counters collection with the REST path).
+        invoice_number = f"INV-{await _next_seq(self.db, 'invoice'):05d}"
         
         # Calculate amounts
         total = self.session.current_draft["total"]
@@ -558,18 +563,8 @@ class FunctionExecutor:
                 "message": "Purchase mein koi items nahi hain. Pehle items add karo"
             }
         
-        # Generate purchase number
-        last_purchase = await self.db.purchases.find_one(
-            {},
-            {"_id": 0, "purchase_number": 1},
-            sort=[("purchase_number", -1)]
-        )
-        
-        if last_purchase:
-            last_num = int(last_purchase["purchase_number"].split("-")[1])
-            purchase_number = f"PUR-{last_num + 1:05d}"
-        else:
-            purchase_number = "PUR-00001"
+        # Atomic purchase number (shared counters collection with REST path).
+        purchase_number = f"PUR-{await _next_seq(self.db, 'purchase'):05d}"
         
         # Create purchase document
         purchase_doc = {

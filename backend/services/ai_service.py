@@ -61,20 +61,32 @@ async def parse_invoice_image(file: UploadFile):
     unique_filename = f"{uuid.uuid4()}{file_extension}"
     file_path = os.path.join(upload_dir, unique_filename)
 
+    # Hard cap on upload size. 10 MB is plenty for an invoice scan; without
+    # this, a 500 MB POST would consume ~700 MB of memory (file → base64) and
+    # fill disk before any rejection could happen.
+    MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
     # Reset file cursor to 0 before reading/saving
     await file.seek(0)
 
     try:
-        # Save file to disk
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-            
-        # URL to be stored in DB (relative path or full URL depending on how we serve statics)
-        attachment_url = f"/api/uploads/{unique_filename}" 
-
-        # 2. Reset cursor again for AI processing (reading as base64)
-        await file.seek(0)
+        # 1. Read & validate size FIRST, then write to disk
         file_content = await file.read()
+        if len(file_content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum allowed: {MAX_UPLOAD_BYTES // (1024*1024)} MB"
+            )
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file upload")
+
+        with open(file_path, "wb") as buffer:
+            buffer.write(file_content)
+
+        # URL to be stored in DB (relative path or full URL depending on how we serve statics)
+        attachment_url = f"/api/uploads/{unique_filename}"
+
+        # 2. Reuse the bytes we already read for base64 encoding
         encoded_image = base64.b64encode(file_content).decode('utf-8')
 
         system_prompt = """
@@ -148,6 +160,15 @@ async def parse_invoice_image(file: UploadFile):
 
         return data
 
+    except HTTPException:
+        # Already-formatted HTTPException (size limit, missing client) — let it through unchanged.
+        raise
     except Exception as e:
-        logger.error(f"Error parsing invoice: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI Processing Failed: {str(e)}")
+        # Log full detail server-side, return a generic message to the client.
+        # The Azure/OpenAI SDK's `str(e)` can include the endpoint URL,
+        # deployment name, and other infra details that should not leak.
+        logger.exception(f"AI invoice parsing failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="AI processing failed. Please try again or upload a clearer image."
+        )

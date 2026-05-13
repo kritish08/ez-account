@@ -26,16 +26,21 @@ export const UIFilters = ({
 }) => {
     return (
         <div className="flex flex-col xl:flex-row items-start xl:items-center gap-3 mb-6">
-            {/* Search */}
-            <div className="relative flex-1 w-full xl:max-w-sm">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                <Input
-                    placeholder={searchPlaceholder}
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="pl-9"
-                />
-            </div>
+            {/* Search — only render the input when a setter was provided.
+                Some callers (e.g. CustomerDetail) don't have a search box but
+                still want the rest of the filter row; the previous version
+                would crash with "setSearch is not a function" on keystroke. */}
+            {typeof setSearch === "function" && (
+                <div className="relative flex-1 w-full xl:max-w-sm">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                    <Input
+                        placeholder={searchPlaceholder}
+                        value={search ?? ""}
+                        onChange={(e) => setSearch(e.target.value)}
+                        className="pl-9"
+                    />
+                </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
                 {/* Status Filter */}

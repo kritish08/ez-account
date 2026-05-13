@@ -170,18 +170,19 @@ const FinishedGoods = () => {
   };
 
   const confirmDelete = async () => {
-    // Optimistic delete
-    setProducts((prev) => prev.filter((p) => p.id !== productToDelete.id));
-    setDeleteDialogOpen(false);
+    // Pessimistic delete: see RawMaterials.js for rationale. On failure the
+    // row stays where it is; on success we drop it immediately and refresh
+    // for any side-effects (linked stock movements, etc.).
     const deleted = productToDelete;
+    setDeleteDialogOpen(false);
     setProductToDelete(null);
     try {
       await deleteProduct(deleted.id);
+      setProducts((prev) => prev.filter((p) => p.id !== deleted.id));
       toast.success("Product deleted successfully");
       refresh();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Failed to delete product");
-      refresh();
     }
   };
 

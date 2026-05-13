@@ -36,17 +36,25 @@ class WebSocketSessionManager:
     
     async def connect(self, user_id: str, websocket: WebSocket) -> VoiceSession:
         """
-        Accept a new WebSocket connection and create/resume session.
-        
-        Args:
-            user_id: User's unique ID
-            websocket: WebSocket connection
-        
-        Returns:
-            Voice session for this user
+        Register a connected & already-accepted WebSocket and create/resume
+        the session for this user.
+
+        NOTE: The caller is responsible for calling `await websocket.accept()`
+        BEFORE invoking this — auth happens at the route level (so the JWT
+        can be verified from a handshake message rather than the URL), and
+        the route accepts the socket itself to enable that handshake.
         """
-        await websocket.accept()
-        
+        # If this user already has an open socket (second tab, reconnect
+        # without a clean disconnect), close the old one so it doesn't leak
+        # an orphan TCP connection. The previous code silently overwrote
+        # the dict entry, leaving the old socket open forever.
+        existing_ws = self.active_websockets.get(user_id)
+        if existing_ws is not None and existing_ws is not websocket:
+            try:
+                await existing_ws.close(code=1001, reason="Replaced by new connection")
+            except Exception:
+                pass
+
         # Resume existing session or create new one
         if user_id in self.active_sessions:
             session = self.active_sessions[user_id]
@@ -55,7 +63,7 @@ class WebSocketSessionManager:
         else:
             session = VoiceSession(user_id)
             self.active_sessions[user_id] = session
-        
+
         self.active_websockets[user_id] = websocket
         
         # Send welcome message

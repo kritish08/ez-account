@@ -55,21 +55,28 @@ const Dashboard = () => {
   const { modules } = useModules();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
   useEffect(() => {
+    // Cancellation guard prevents setState-after-unmount.
+    let cancelled = false;
+    const fetchDashboard = async () => {
+      try {
+        setLoadError(null);
+        const response = await getDashboard();
+        if (!cancelled) setData(response.data);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to fetch dashboard:", error);
+          setLoadError(error?.response?.data?.detail || "Failed to load dashboard");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
     fetchDashboard();
+    return () => { cancelled = true; };
   }, []);
-
-  const fetchDashboard = async () => {
-    try {
-      const response = await getDashboard();
-      setData(response.data);
-    } catch (error) {
-      console.error("Failed to fetch dashboard:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   if (loading) {
     return (
@@ -143,6 +150,17 @@ const Dashboard = () => {
             </CardContent>
           </Card>
         </div>
+      </div>
+    );
+  }
+
+  if (loadError || !data) {
+    return (
+      <div className="space-y-4 animate-fade-in p-8 text-center" data-testid="dashboard-error">
+        <AlertTriangle className="h-8 w-8 mx-auto text-red-500" />
+        <h2 className="text-lg font-semibold text-slate-900">Dashboard couldn't load</h2>
+        <p className="text-sm text-slate-500">{loadError || "Unable to fetch dashboard data. Please try again."}</p>
+        <Button onClick={() => window.location.reload()}>Reload</Button>
       </div>
     );
   }

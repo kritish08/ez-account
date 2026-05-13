@@ -185,7 +185,7 @@ const DebitNoteDetail = () => {
                 <div className="space-y-6">
                     <Card>
                         <CardContent className="p-6">
-                            <h3 className="tex-sm font-medium text-slate-500 uppercase tracking-wide mb-4">Supplier Details</h3>
+                            <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-4">Supplier Details</h3>
                             <p className="font-semibold text-slate-900">{debitNote.supplier_name}</p>
                             <Link to={`/suppliers/${debitNote.supplier_id}`} className="text-sm text-brand-600 hover:underline mt-2 block">
                                 View Supplier Profile

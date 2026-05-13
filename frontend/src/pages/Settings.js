@@ -89,7 +89,9 @@ const Settings = () => {
   );
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirmation, setResetConfirmation] = useState("");
   const [resetting, setResetting] = useState(false);
+  const RESET_PHRASE = "DELETE ALL ACCOUNTING DATA";
 
   useEffect(() => {
     fetchSettings();
@@ -106,6 +108,11 @@ const Settings = () => {
   const { modules, setModules } = useModules();
   
   const handleModuleToggle = async (key, checked) => {
+    // Capture the previous value EXPLICITLY before the optimistic update.
+    // The previous code did `setModules(modules)` in the catch, but by that
+    // point `modules` from the closure might already reflect the optimistic
+    // change (depending on render scheduling), making the rollback a no-op.
+    const previous = { ...modules };
     const newSettings = { ...modules, [key]: checked };
     setModules(newSettings);
     try {
@@ -114,8 +121,7 @@ const Settings = () => {
       toast.success(`${moduleName} ${checked ? "enabled" : "disabled"}`);
     } catch (error) {
       toast.error("Failed to update module settings");
-      // revert back
-      setModules(modules);
+      setModules(previous);
     }
   };
 
@@ -236,9 +242,12 @@ const Settings = () => {
 
   const handleFactoryReset = async () => {
     if (!resetPassword) return toast.error("Password required");
+    if (resetConfirmation !== RESET_PHRASE) {
+      return toast.error(`Confirmation phrase must be exactly: ${RESET_PHRASE}`);
+    }
     setResetting(true);
     try {
-      await resetSystem({ password: resetPassword });
+      await resetSystem({ password: resetPassword, confirmation: resetConfirmation });
       toast.success("Application reset successfully");
       setResetDialogOpen(false);
       window.location.reload();
@@ -247,6 +256,7 @@ const Settings = () => {
     } finally {
       setResetting(false);
       setResetPassword("");
+      setResetConfirmation("");
     }
   };
 
@@ -572,7 +582,9 @@ const Settings = () => {
               Confirm Factory Reset
             </DialogTitle>
             <DialogDescription>
-              This action cannot be undone. All financial data will be permanently wiped. Verify your password to continue.
+              This action cannot be undone. All financial data will be permanently wiped.
+              Verify your password and type the confirmation phrase exactly to continue.
+              Rate-limited to one reset per hour per user.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
@@ -586,12 +598,29 @@ const Settings = () => {
                 placeholder="Enter password..."
               />
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirmation">
+                Confirmation phrase — type <code className="font-mono">{RESET_PHRASE}</code>
+              </Label>
+              <Input
+                id="confirmation"
+                type="text"
+                value={resetConfirmation}
+                onChange={(e) => setResetConfirmation(e.target.value)}
+                placeholder={RESET_PHRASE}
+                autoComplete="off"
+              />
+            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setResetDialogOpen(false)}>
+            <Button variant="outline" onClick={() => { setResetDialogOpen(false); setResetPassword(""); setResetConfirmation(""); }}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleFactoryReset} disabled={!resetPassword || resetting}>
+            <Button
+              variant="destructive"
+              onClick={handleFactoryReset}
+              disabled={!resetPassword || resetConfirmation !== RESET_PHRASE || resetting}
+            >
               {resetting ? "Erasing..." : "Permanently Erase Database"}
             </Button>
           </DialogFooter>

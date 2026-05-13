@@ -321,9 +321,6 @@ const CreateInvoice = () => {
         notes: parsed.notes || '',
         is_draft: false,
         items: mappedItems,
-        notes: parsed.notes || '',
-        is_draft: false,
-        items: mappedItems,
         attachment_url: parsed.attachment_url || "",
         apply_credit: false
       });
@@ -484,7 +481,7 @@ const CreateInvoice = () => {
           {formData.attachment_url && (
             <div className="text-sm text-emerald-600 flex items-center gap-1 mt-2">
               <Info className="h-4 w-4" />
-              <a href={`http://localhost:8000${formData.attachment_url}`} target="_blank" rel="noopener noreferrer" className="underline">
+              <a href={`${process.env.REACT_APP_BACKEND_URL}${formData.attachment_url}`} target="_blank" rel="noopener noreferrer" className="underline">
                 View Attached Bill
               </a>
             </div>

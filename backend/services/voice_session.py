@@ -73,12 +73,22 @@ class VoiceSession:
         
         return None
     
+    # Maximum number of conversation turns to retain. Each call to GPT sends
+    # the full history so this is both a memory cap (per-session dict size)
+    # and a token-cost cap (longer history = more input tokens every turn).
+    MAX_HISTORY_TURNS = 20
+
     def add_message(self, role: str, content: str):
-        """Add a message to conversation history."""
+        """Add a message to conversation history (bounded to the last N turns)."""
         self.conversation_history.append({
             "role": role,
             "content": content
         })
+        # Trim from the front so we keep the most recent turns. The system
+        # prompt isn't stored here (it's prepended at request time), so we
+        # can drop the oldest items freely without losing instructions.
+        if len(self.conversation_history) > self.MAX_HISTORY_TURNS:
+            self.conversation_history = self.conversation_history[-self.MAX_HISTORY_TURNS:]
         self.last_activity = datetime.utcnow()
     
     def reset_draft(self):

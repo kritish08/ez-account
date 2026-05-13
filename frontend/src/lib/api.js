@@ -2,6 +2,27 @@ import axios from "axios";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Global 401 handler: clear stale auth and bounce to /login so list pages
+// don't silently render as "empty" when the token has expired or was missing.
+let interceptorInstalled = false;
+if (!interceptorInstalled) {
+  axios.interceptors.response.use(
+    (response) => response,
+    (error) => {
+      if (error?.response?.status === 401) {
+        const onLoginPage = window.location.pathname === "/login";
+        if (!onLoginPage) {
+          localStorage.removeItem("token");
+          delete axios.defaults.headers.common["Authorization"];
+          window.location.assign("/login");
+        }
+      }
+      return Promise.reject(error);
+    }
+  );
+  interceptorInstalled = true;
+}
+
 // Helper to format currency
 export const formatCurrency = (amount) => {
   if (amount === null || amount === undefined) return "₹ 0.00";
@@ -91,7 +112,8 @@ export const downloadInvoicePDF = async (id) => {
 };
 
 // Payments
-export const getPayments = () => axios.get(`${API}/payments`);
+export const getPayments = (startDate, endDate) =>
+  axios.get(`${API}/payments`, { params: { start_date: startDate, end_date: endDate } });
 export const createPayment = (data) => axios.post(`${API}/payments`, data);
 export const deletePayment = (id) => axios.delete(`${API}/payments/${id}`);
 
@@ -101,21 +123,24 @@ export const createSupplierPayment = (data) =>
 export const deleteSupplierPayment = (id) => axios.delete(`${API}/supplier-payments/${id}`);
 
 // Expenses
-export const getExpenses = () => axios.get(`${API}/expenses`);
+export const getExpenses = (startDate, endDate) =>
+  axios.get(`${API}/expenses`, { params: { start_date: startDate, end_date: endDate } });
 export const getExpense = (id) => axios.get(`${API}/expenses/${id}`);
 export const createExpense = (data) => axios.post(`${API}/expenses`, data);
 export const updateExpense = (id, data) => axios.put(`${API}/expenses/${id}`, data);
 export const deleteExpense = (id) => axios.delete(`${API}/expenses/${id}`);
 
 // Credit Notes
-export const getCreditNotes = () => axios.get(`${API}/credit-notes`);
+export const getCreditNotes = (startDate, endDate) =>
+  axios.get(`${API}/credit-notes`, { params: { start_date: startDate, end_date: endDate } });
 export const getCreditNote = (id) => axios.get(`${API}/credit-notes/${id}`);
 export const createCreditNote = (data) => axios.post(`${API}/credit-notes`, data);
 export const updateCreditNote = (id, data) => axios.put(`${API}/credit-notes/${id}`, data);
 export const deleteCreditNote = (id) => axios.delete(`${API}/credit-notes/${id}`);
 
 // Debit Notes
-export const getDebitNotes = () => axios.get(`${API}/debit-notes`);
+export const getDebitNotes = (startDate, endDate) =>
+  axios.get(`${API}/debit-notes`, { params: { start_date: startDate, end_date: endDate } });
 export const getDebitNote = (id) => axios.get(`${API}/debit-notes/${id}`);
 export const createDebitNote = (data) => axios.post(`${API}/debit-notes`, data);
 export const updateDebitNote = (id, data) => axios.put(`${API}/debit-notes/${id}`, data);
