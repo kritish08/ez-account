@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.deps import get_current_user
 from app.schemas.customer import CustomerCreate, CustomerUpdate
-from app.services.ledger import create_ledger_entry, get_account_balance
+from app.services.ledger import create_ledger_entry, delete_ledger_entries, get_account_balance
 from app.services.payments_apply import get_customer_credit
 
 router = APIRouter(prefix="/api", tags=["customers"])
@@ -332,7 +332,10 @@ async def delete_customer(customer_id: str, current_user: dict = Depends(get_cur
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    # Check dependencies
+    # Check ALL dependencies, not just invoices + payments. Previously a
+    # customer with only credit-notes or advance-payments could be deleted
+    # while leaving orphaned references — mirroring the original supplier-
+    # delete gap fixed in iteration 2.
     invoices = await db.invoices.count_documents({"customer_id": customer_id})
     if invoices > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing invoices")
@@ -340,6 +343,18 @@ async def delete_customer(customer_id: str, current_user: dict = Depends(get_cur
     payments = await db.payments.count_documents({"customer_id": customer_id})
     if payments > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing payments")
+
+    credit_notes = await db.credit_notes.count_documents({"customer_id": customer_id})
+    if credit_notes > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete customer with existing credit notes")
+
+    advance_payments = await db.advance_payments.count_documents({"customer_id": customer_id})
+    if advance_payments > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete customer with existing advance payments")
+
+    # Clean up opening-balance ledger entries posted at customer creation.
+    # Without this they'd linger forever and pollute trial balance / reports.
+    await delete_ledger_entries("setup", customer_id)
 
     await db.customers.delete_one({"id": customer_id})
     return {"message": "Customer deleted"}
