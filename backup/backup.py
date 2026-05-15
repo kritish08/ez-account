@@ -16,16 +16,15 @@ Required env vars (inherited from backend/.env):
 import os
 import json
 import uuid
-import struct
-import hmac
 import hashlib
 import base64
 import logging
 from datetime import datetime, timezone
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import ClientError
 from pymongo import MongoClient
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -52,12 +51,32 @@ COLLECTIONS = [
 def derive_key(hex_key: str) -> bytes:
     """Derive a 32-byte AES key from the hex master key."""
     raw = bytes.fromhex(hex_key)
+    import hashlib
     return hashlib.sha256(raw).digest()
 
 
+def decrypt_envelope(encrypted_package: dict, hex_key: str) -> str:
+    """
+    Decrypt a value stored using the server's envelope encryption (encrypt_data).
+    This is the mirror of server.py::decrypt_data().
+    """
+    mek_bytes = bytes.fromhex(hex_key)
+    mek_nonce = base64.b64decode(encrypted_package["mek_nonce"])
+    encrypted_dek = base64.b64decode(encrypted_package["encrypted_dek"])
+    nonce = base64.b64decode(encrypted_package["nonce"])
+    encrypted_data = base64.b64decode(encrypted_package["encrypted_data"])
+
+    # Decrypt DEK with MEK
+    mek_aesgcm = AESGCM(mek_bytes)
+    dek = mek_aesgcm.decrypt(mek_nonce, encrypted_dek, None)
+
+    # Decrypt data with DEK
+    aesgcm = AESGCM(dek)
+    return aesgcm.decrypt(nonce, encrypted_data, None).decode("utf-8")
+
+
 def encrypt_data(plaintext: bytes, hex_key: str) -> dict:
-    """AES-256-GCM encryption — matches the app's encrypt_data() function."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    """AES-256-GCM encryption for the backup file itself."""
     key = derive_key(hex_key)
     nonce = os.urandom(12)
     aesgcm = AESGCM(key)
@@ -80,10 +99,20 @@ def main():
         log.error("Go to Settings → Cloud Backup in the app and configure S3 first.")
         return
 
-    aws_key    = s3_settings["aws_access_key_id"]
-    aws_secret = s3_settings["aws_secret_access_key"]
-    bucket     = s3_settings["bucket_name"]
-    region     = s3_settings.get("region", "us-east-1")
+    aws_key = s3_settings["aws_access_key_id"]
+    bucket  = s3_settings["bucket_name"]
+    region  = s3_settings.get("region", "us-east-1")
+
+    # Decrypt the stored secret key (supports both encrypted and legacy plaintext)
+    if s3_settings.get("aws_secret_access_key_encrypted") and HEX_KEY:
+        log.info("Decrypting S3 secret key...")
+        aws_secret = decrypt_envelope(s3_settings["aws_secret_access_key_encrypted"], HEX_KEY)
+    elif s3_settings.get("aws_secret_access_key"):
+        log.warning("S3 secret key is stored in plaintext (legacy). Re-save S3 settings in the app to encrypt it.")
+        aws_secret = s3_settings["aws_secret_access_key"]
+    else:
+        log.error("No AWS secret key found in settings. Cannot upload backup.")
+        return
 
     # ── Dump all collections ──────────────────────────────────
     log.info("Dumping %d collections...", len(COLLECTIONS))
