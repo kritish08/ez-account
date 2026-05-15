@@ -18,7 +18,7 @@ from app.services.ledger import create_ledger_entry
 
 
 async def get_product_stock(product_id: str) -> float:
-    """Current stock = total_in - total_out across all stock_movements."""
+    """Current stock for a single product = total_in - total_out."""
     pipeline = [
         {"$match": {"product_id": product_id}},
         {"$group": {
@@ -31,6 +31,25 @@ async def get_product_stock(product_id: str) -> float:
     if result:
         return result[0]["total_in"] - result[0]["total_out"]
     return 0
+
+
+async def get_all_product_stock() -> dict[str, float]:
+    """Stock per product across every product in one aggregation.
+
+    Returns {product_id: stock}. Reports / dashboards that need
+    stock for many products at once should call this once instead of
+    looping over `get_product_stock` (which is one aggregation per call).
+    """
+    pipeline = [
+        {"$group": {
+            "_id": "$product_id",
+            "stock": {"$sum": {"$subtract": ["$quantity_in", "$quantity_out"]}},
+        }},
+    ]
+    stock_map: dict[str, float] = {}
+    async for row in db.stock_movements.aggregate(pipeline):
+        stock_map[row["_id"]] = row["stock"]
+    return stock_map
 
 
 async def create_stock_movement(

@@ -43,11 +43,21 @@ async def list_production_orders(
         query["product_id"] = product_id
 
     orders = await db.production_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(None)
+    if not orders:
+        return []
 
-    # Enrich with product names
+    # Batch-fetch product names in one query instead of one per order (N+1).
+    product_ids = list({o["product_id"] for o in orders if o.get("product_id")})
+    name_map = {}
+    if product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            name_map[p["id"]] = p["name"]
+
     for o in orders:
-        p = await db.products.find_one({"id": o["product_id"]}, {"_id": 0})
-        o["product_name"] = p["name"] if p else "Unknown"
+        o["product_name"] = name_map.get(o.get("product_id"), "Unknown")
 
     return orders
 

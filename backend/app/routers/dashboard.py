@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from app.database import db
 from app.deps import get_current_user
 from app.services.ledger import get_account_balance
+from app.services.stock import get_all_product_stock
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -76,19 +77,11 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     month_sales_res = await db.invoices.aggregate(month_sales_pipeline).to_list(1)
     monthly_sales = round(month_sales_res[0]["total"], 2) if month_sales_res else 0.0
 
-    # Low-stock detection: compute stock per product in one aggregation,
-    # then join in Python against the products list to apply per-product
-    # thresholds and produce the top-5 list.
+    # Low-stock detection: stock per product in one aggregation via the
+    # shared service helper, then join in Python against the products list
+    # to apply per-product thresholds and produce the top-5 list.
     products = await db.products.find({}, {"_id": 0}).to_list(None)
-    stock_pipeline = [
-        {"$group": {
-            "_id": "$product_id",
-            "stock": {"$sum": {"$subtract": ["$quantity_in", "$quantity_out"]}},
-        }},
-    ]
-    stock_map = {}
-    async for row in db.stock_movements.aggregate(stock_pipeline):
-        stock_map[row["_id"]] = row["stock"]
+    stock_map = await get_all_product_stock()
 
     low_stock_count = 0
     low_stock_products = []
