@@ -237,15 +237,34 @@ async def delete_payment(payment_id: str, current_user: dict = Depends(get_curre
     # Reverse Ledger
     await delete_ledger_entries("payment", payment_id)
 
-    # Reverse effects on invoices (re-open them)
-    allocations = await db.payment_allocations.find({"payment_id": payment_id}).to_list(None)
-    for alloc in allocations:
-        invoice_id = alloc["invoice_id"]
-        amount = alloc["amount"]
+    # Reverse effects on invoices (re-open them). A single payment can be
+    # split across many invoices via FIFO, so pre-fetch all affected
+    # invoices in one batched query instead of one find_one per allocation.
+    allocations = await db.payment_allocations.find(
+        {"payment_id": payment_id},
+        {"_id": 0, "invoice_id": 1, "amount": 1},
+    ).to_list(None)
 
-        invoice = await db.invoices.find_one({"id": invoice_id})
-        if invoice:
-            new_paid = max(0, invoice.get("paid_amount", 0) - amount)
+    if allocations:
+        invoice_ids = list({a["invoice_id"] for a in allocations})
+        invoice_map: dict[str, dict] = {}
+        async for inv in db.invoices.find(
+            {"id": {"$in": invoice_ids}},
+            {"_id": 0, "id": 1, "total": 1, "paid_amount": 1},
+        ):
+            invoice_map[inv["id"]] = inv
+
+        # Aggregate allocations by invoice so a payment split into multiple
+        # rows against the same invoice (rare but possible) is handled.
+        deduct_by_invoice: dict[str, float] = {}
+        for alloc in allocations:
+            deduct_by_invoice[alloc["invoice_id"]] = deduct_by_invoice.get(alloc["invoice_id"], 0) + alloc["amount"]
+
+        for invoice_id, total_deduct in deduct_by_invoice.items():
+            invoice = invoice_map.get(invoice_id)
+            if not invoice:
+                continue
+            new_paid = max(0, invoice.get("paid_amount", 0) - total_deduct)
             new_status = "partially_paid" if new_paid > 0 else "unpaid"
             if new_paid >= invoice["total"]:
                 new_status = "paid"
