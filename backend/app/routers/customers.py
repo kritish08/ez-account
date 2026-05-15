@@ -56,34 +56,31 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
     that was 200 sequential MongoDB round-trips and was the primary cause
     of "customers fail to load" timeouts. Now: 3 queries regardless of N.
     """
-    customers = await db.customers.find({}, {"_id": 0}).sort("name", 1).to_list(None)
-    if not customers:
-        return []
-
-    customer_ids = [c["id"] for c in customers]
-    customer_accounts = [f"customer:{cid}" for cid in customer_ids]
-
-    # Outstanding per customer in one aggregation
-    outstanding_map = {}
+    # Three parallel reads — customers list + outstanding-balance aggregation
+    # + available-credit aggregation. The two aggregations don't depend on
+    # the customers list (they filter by prefix / total>0 and join in Python
+    # below), so they fire concurrently with the customers fetch.
     outstanding_pipeline = [
-        {"$match": {"account": {"$in": customer_accounts}}},
+        {"$match": {"account": {"$regex": "^customer:"}}},
         {"$group": {
             "_id": "$account",
             "balance": {"$sum": {"$subtract": ["$debit", "$credit"]}},
         }},
     ]
-    async for row in db.ledger.aggregate(outstanding_pipeline):
-        cid = row["_id"].split(":", 1)[1]
-        outstanding_map[cid] = round(row["balance"], 2)
-
-    # Available credit per customer in one aggregation
-    credit_map = {}
     credit_pipeline = [
-        {"$match": {"customer_id": {"$in": customer_ids}, "total": {"$gt": 0}}},
+        {"$match": {"total": {"$gt": 0}}},
         {"$group": {"_id": "$customer_id", "credit": {"$sum": "$total"}}},
     ]
-    async for row in db.credit_notes.aggregate(credit_pipeline):
-        credit_map[row["_id"]] = round(row["credit"], 2)
+    customers, outstanding_rows, credit_rows = await asyncio.gather(
+        db.customers.find({}, {"_id": 0}).sort("name", 1).to_list(None),
+        db.ledger.aggregate(outstanding_pipeline).to_list(None),
+        db.credit_notes.aggregate(credit_pipeline).to_list(None),
+    )
+    if not customers:
+        return []
+
+    outstanding_map = {row["_id"].split(":", 1)[1]: round(row["balance"], 2) for row in outstanding_rows}
+    credit_map = {row["_id"]: round(row["credit"], 2) for row in credit_rows}
 
     for customer in customers:
         customer["outstanding"] = outstanding_map.get(customer["id"], 0.0)
