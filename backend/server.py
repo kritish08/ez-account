@@ -32,60 +32,30 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 from dotenv import load_dotenv
 
+# ============================================================
+# Phase 0 of the server.py refactor — see docs/refactor-plan.md.
+# Config, database client, and Pydantic models have moved into the
+# `app/` package. They're re-exported here so the (still very long)
+# route handlers below can keep referencing the same symbols.
+# ============================================================
+from app.config import (
+    MONGO_URL, DB_NAME, SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES,
+    MASTER_ENCRYPTION_KEY, WEBAUTHN_RP_ID, WEBAUTHN_RP_NAME,
+)
+from app.database import client, db
+from app.deps import security, get_current_user
+
 # Internal imports
 from services.ai_service import parse_invoice_image
 
-# Load environment variables
-load_dotenv()
-
-# Configuration
-MONGO_URL = os.getenv("MONGO_URL")
-DB_NAME = os.getenv("DB_NAME", "BlitzerDB")
-SECRET_KEY = os.getenv("JWT_SECRET")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
-MASTER_ENCRYPTION_KEY = os.getenv("MASTER_ENCRYPTION_KEY")
-
-# WebAuthn / Passkey configuration. RP_ID must match the host the browser
-# sees (no scheme, no port for normal hostnames). For localhost dev this is
-# "localhost"; for the production domain it would be e.g. "ezaccounts.zerp.me".
-WEBAUTHN_RP_ID = os.getenv("WEBAUTHN_RP_ID", "localhost")
-WEBAUTHN_RP_NAME = os.getenv("WEBAUTHN_RP_NAME", "EZ Accounts")
+# WebAuthn / FIDO2 server — built from the RP config. Kept at module scope
+# until Phase 1 moves it into app/services/passkey.py.
 _webauthn_rp = PublicKeyCredentialRpEntity(id=WEBAUTHN_RP_ID, name=WEBAUTHN_RP_NAME)
 fido_server = Fido2Server(_webauthn_rp)
-
-# Fail fast if required secrets are missing or use known-default values.
-# An attacker who knows the default can forge tokens for any user.
-if not SECRET_KEY or SECRET_KEY in ("supersecretkey", "changeme", "secret"):
-    raise RuntimeError(
-        "JWT_SECRET environment variable must be set to a strong random value. "
-        "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
-    )
-if not MONGO_URL:
-    raise RuntimeError("MONGO_URL environment variable must be set")
-
-# MASTER_ENCRYPTION_KEY is optional (backup feature only), but if set, it must
-# be a valid 64-char hex string (32 bytes for AES-256). Catching a malformed
-# value at startup is much better than a 500 traceback at /backup/create time.
-if MASTER_ENCRYPTION_KEY:
-    try:
-        _key_bytes = bytes.fromhex(MASTER_ENCRYPTION_KEY)
-        if len(_key_bytes) != 32:
-            raise ValueError(f"expected 32 bytes, got {len(_key_bytes)}")
-    except ValueError as _e:
-        raise RuntimeError(
-            f"MASTER_ENCRYPTION_KEY must be a 64-char hex string (32 bytes for AES-256). "
-            f"Generate one with: python -c 'import secrets; print(secrets.token_hex(32))'. "
-            f"Validation error: {_e}"
-        )
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Database Setup
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
 
 # Voice assistant session manager — instantiated inside lifespan because its
 # __init__ schedules a background task and needs a running event loop.
@@ -385,305 +355,35 @@ app.mount("/api/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
 api_router = APIRouter(prefix="/api")
 
-# ... existing code ...
-
-class ProductCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    sku: Optional[str] = None
-    barcode: Optional[str] = None
-    hsn: Optional[str] = None
-    unit: str = "pcs"
-    category: Optional[str] = None
-    item_type: str = "FINISHED_GOOD"  # RAW_MATERIAL | SEMI_FINISHED | FINISHED_GOOD | CONSUMABLE | SERVICE
-    # All price/stock fields are non-negative. Free items (price=0) are
-    # allowed; negative prices/stock are nonsense and would corrupt every
-    # downstream report.
-    selling_price: float = Field(..., ge=0)
-    cost_price: float = Field(default=0, ge=0)
-    stock_quantity: float = Field(default=0, ge=0)
-    opening_stock: float = Field(default=0, ge=0)
-    low_stock_threshold: float = Field(default=10, ge=0)
-    reorder_point: float = Field(default=0, ge=0)
-    track_batches: bool = False
-    track_serials: bool = False
-
-class ProductUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    sku: Optional[str] = None
-    barcode: Optional[str] = None
-    hsn: Optional[str] = None
-    unit: Optional[str] = None
-    category: Optional[str] = None
-    item_type: Optional[str] = None
-    selling_price: Optional[float] = Field(default=None, ge=0)
-    cost_price: Optional[float] = Field(default=None, ge=0)
-    stock_quantity: Optional[float] = Field(default=None, ge=0)
-    low_stock_threshold: Optional[float] = Field(default=None, ge=0)
-    reorder_point: Optional[float] = Field(default=None, ge=0)
-    track_batches: Optional[bool] = None
-    track_serials: Optional[bool] = None
-
-class StockMovementCreate(BaseModel):
-    product_id: str
-    quantity: float  # Positive for IN, Negative for OUT
-    type: str  # 'SALE', 'PURCHASE', 'ADJUSTMENT', 'RETURN'
-    source_id: Optional[str] = None  # Invoice ID, Purchase ID, etc.
-    notes: Optional[str] = None
-    date: Optional[str] = None
-
-class BatchCreate(BaseModel):
-    product_id: str
-    batch_number: str
-    quantity: float
-    manufacturing_date: Optional[str] = None
-    expiry_date: Optional[str] = None
-
-class SerialNumberCreate(BaseModel):
-    product_id: str
-    batch_id: Optional[str] = None
-    serial_number: str
-    status: str = "IN_STOCK"  # IN_STOCK, SOLD, LOST
-
-class CustomerCreate(BaseModel):
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    gstin: Optional[str] = None
-    # Opening balance must be non-negative — the direction (debit/credit) is
-    # captured by `balance_type`. Allowing negative here led to ledger entries
-    # with the wrong sign.
-    opening_balance: float = Field(default=0, ge=0)
-    balance_type: Optional[str] = "debit"  # "debit" = AR (customer owes us), "credit" = customer prepaid us
-
-class CustomerUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    gstin: Optional[str] = None
-
-class SupplierCreate(BaseModel):
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    gstin: Optional[str] = None
-    opening_balance: float = Field(default=0, ge=0)
-
-class SupplierUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    gstin: Optional[str] = None
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class ModulesSettings(BaseModel):
-    enable_credit_notes: bool = True
-    enable_debit_notes: bool = True
-    enable_advanced_ims: bool = False
-    enable_production: bool = False
-
-class BackupScheduleSettings(BaseModel):
-    """User-configurable cron schedule for the automatic S3 backup job."""
-    enabled: bool = False
-    frequency: str = "daily"          # "daily" | "weekly"
-    time: str = "00:00"               # HH:MM 24h
-    timezone: str = "UTC"             # IANA tz name
-    day_of_week: Optional[int] = 0    # 0=Mon ... 6=Sun (only for weekly)
-
-# BOM and Production Order schemas
-class BOMComponent(BaseModel):
-    material_id: str
-    quantity: float
-    unit: Optional[str] = None
-
-class BOMCreate(BaseModel):
-    version: str = "1.0"
-    components: List[BOMComponent]
-
-class ProductionOrderCreate(BaseModel):
-    product_id: str
-    quantity: float
-    batch_id: Optional[str] = None
-    notes: Optional[str] = None
-    planned_start_date: Optional[str] = None
-
-class ProductionOrderUpdate(BaseModel):
-    status: Optional[str] = None
-    notes: Optional[str] = None
-    batch_id: Optional[str] = None
-    ingredient_overrides: Optional[List[dict]] = None  # [{material_id, batch_id}]
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-# ============== WebAuthn / Passkey models ==============
-class WebAuthnRegisterComplete(BaseModel):
-    registration_data: dict
-
-class WebAuthnAuthenticateBegin(BaseModel):
-    email: str
-
-class WebAuthnAuthenticateComplete(BaseModel):
-    email: str
-    credential_data: dict
-
-class BusinessSetup(BaseModel):
-    name: str
-    address: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    gstin: Optional[str] = None
-    opening_cash: float = 0
-    opening_bank: float = 0
-
-class PurchaseItem(BaseModel):
-    product_id: Optional[str] = None
-    # Quantity & price guards — accepting negatives or zero silently corrupts
-    # stock (a negative purchase quantity credits stock instead of debiting)
-    # and ledger sums. Validators reject those at the API boundary.
-    quantity: float = Field(..., gt=0)
-    cost_price: float = Field(..., ge=0)
-    batch_id: Optional[str] = None
-    serial_numbers: Optional[List[str]] = None
-
-class PurchaseCreate(BaseModel):
-    supplier_id: Optional[str] = None
-    items: List[PurchaseItem]
-    payment_status: str = "unpaid"  # cash, bank, unpaid
-    date: Optional[str] = None
-    notes: Optional[str] = None
-    attachment_url: Optional[str] = None
-    apply_debit: bool = False
-
-class PurchaseUpdate(BaseModel):
-    supplier_id: Optional[str] = None
-    items: List[PurchaseItem]
-    payment_status: str = "unpaid"
-    date: Optional[str] = None
-    notes: Optional[str] = None
-    attachment_url: Optional[str] = None
-    apply_debit: bool = False
-
-class InvoiceLineItem(BaseModel):
-    product_id: Optional[str] = None  # None for free-text items
-    description: str
-    quantity: float = Field(..., gt=0)
-    rate: float = Field(..., ge=0)
-    batch_id: Optional[str] = None
-    serial_numbers: Optional[List[str]] = None
-
-class InvoiceCreate(BaseModel):
-    customer_id: str
-    items: List[InvoiceLineItem]
-    notes: Optional[str] = None
-    date: Optional[str] = None
-    is_draft: bool = False
-    attachment_url: Optional[str] = None
-    apply_credit: bool = False
-
-class InvoiceUpdate(BaseModel):
-    items: List[InvoiceLineItem]
-    notes: Optional[str] = None
-    date: Optional[str] = None
-    attachment_url: Optional[str] = None
-    apply_credit: bool = False
-
-class PaymentCreate(BaseModel):
-    customer_id: str
-    amount: float = Field(..., gt=0)
-    mode: str
-    date: Optional[str] = None
-    notes: Optional[str] = None
-    use_credit: bool = False
-    invoice_id: Optional[str] = None
-    credit_note_id: Optional[str] = None  # CN to apply when recording payment
-    advance_payment_id: Optional[str] = None # Advance Payment to apply
-
-class PaymentUpdate(BaseModel):
-    amount: float
-    mode: str
-    date: Optional[str] = None
-    notes: Optional[str] = None
-
-class ExpenseCreate(BaseModel):
-    description: str
-    amount: float = Field(..., gt=0)
-    mode: str
-    category: Optional[str] = None
-    date: Optional[str] = None
-    attachment_url: Optional[str] = None
-
-class ExpenseUpdate(BaseModel):
-    description: str
-    amount: float = Field(..., gt=0)
-    mode: str
-    category: Optional[str] = None
-    date: Optional[str] = None
-    attachment_url: Optional[str] = None
-
-class CreditNoteItem(BaseModel):
-    product_id: Optional[str] = None
-    description: str
-    quantity: float = Field(..., gt=0)
-    rate: float = Field(..., ge=0)
-
-class CreditNoteCreate(BaseModel):
-    customer_id: str
-    invoice_id: Optional[str] = None
-    items: List[CreditNoteItem]
-    reason: Optional[str] = None
-    date: Optional[str] = None
-
-class CreditNoteUpdate(BaseModel):
-    items: List[CreditNoteItem]
-    reason: Optional[str] = None
-    date: Optional[str] = None
-    invoice_id: Optional[str] = None
-
-class DebitNoteItem(BaseModel):
-    product_id: str
-    quantity: float = Field(..., gt=0)
-    cost_price: float = Field(..., ge=0)
-
-class DebitNoteCreate(BaseModel):
-    supplier_id: str
-    purchase_id: Optional[str] = None
-    items: List[DebitNoteItem]
-    reason: Optional[str] = None
-    date: Optional[str] = None
-
-class DebitNoteUpdate(BaseModel):
-    items: List[DebitNoteItem]
-    reason: Optional[str] = None
-    date: Optional[str] = None
-    purchase_id: Optional[str] = None
-
-class S3Settings(BaseModel):
-    aws_access_key_id: str
-    aws_secret_access_key: str
-    bucket_name: str
-    region: str = "us-east-1"
-
-class SystemSettings(BaseModel):
-    registration_enabled: bool = False
-    company_name: Optional[str] = None
-    company_email: Optional[str] = None
-    company_phone: Optional[str] = None
-    company_address: Optional[str] = None
-    tax_id: Optional[str] = None
-    default_currency: Optional[str] = "₹"
+# ============================================================
+# Phase 0 — Pydantic models extracted to app/schemas/.  Imported below so
+# the (still very long) route handlers in this file keep referencing the
+# same symbols. Phase 2 will move the route handlers themselves into
+# app/routers/*.
+# ============================================================
+from app.schemas.common import Token, TokenData, UserLogin
+from app.schemas.product import (
+    ProductCreate, ProductUpdate, StockMovementCreate,
+    BatchCreate, SerialNumberCreate,
+)
+from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.schemas.supplier import SupplierCreate, SupplierUpdate
+from app.schemas.business import BusinessSetup
+from app.schemas.purchase import PurchaseItem, PurchaseCreate, PurchaseUpdate
+from app.schemas.invoice import InvoiceLineItem, InvoiceCreate, InvoiceUpdate
+from app.schemas.payment import PaymentCreate, PaymentUpdate
+from app.schemas.expense import ExpenseCreate, ExpenseUpdate
+from app.schemas.credit_note import CreditNoteItem, CreditNoteCreate, CreditNoteUpdate
+from app.schemas.debit_note import DebitNoteItem, DebitNoteCreate, DebitNoteUpdate
+from app.schemas.bom import BOMComponent, BOMCreate
+from app.schemas.production import ProductionOrderCreate, ProductionOrderUpdate
+from app.schemas.webauthn import (
+    WebAuthnRegisterComplete, WebAuthnAuthenticateBegin, WebAuthnAuthenticateComplete,
+)
+from app.schemas.settings import (
+    ModulesSettings, BackupScheduleSettings, S3Settings,
+    SystemSettings, SystemResetRequest,
+)
 
 # ============== AUTH HELPERS ==============
 
@@ -4963,9 +4663,6 @@ async def update_system_settings(settings: SystemSettings, current_user: dict = 
     await db.settings.update_one({"type": "system"}, {"$set": settings_doc}, upsert=True)
     return {"message": "System settings updated successfully"}
 
-class SystemResetRequest(BaseModel):
-    password: str
-    confirmation: str  # must equal RESET_CONFIRMATION_PHRASE (typed deliberately)
 
 
 # Required confirmation phrase. Deliberately verbose so it can't be triggered
