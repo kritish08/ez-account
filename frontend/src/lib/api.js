@@ -185,10 +185,11 @@ export const getProfitReport = (startDate, endDate) =>
   axios.get(`${API}/reports/profit`, { params: { start_date: startDate, end_date: endDate } });
 export const getProfitLossReport = (startDate, endDate) =>
   axios.get(`${API}/reports/profit-loss`, { params: { start_date: startDate, end_date: endDate } });
-export const getBalanceSheetReport = (asOfDate) =>
-  axios.get(`${API}/reports/balance-sheet`, { params: { as_of: asOfDate } });
-export const getTrialBalanceReport = (asOfDate) =>
-  axios.get(`${API}/reports/trial-balance`, { params: { as_of: asOfDate } });
+// Trial balance and balance sheet are as-of-now snapshots. The backend
+// doesn't accept a date parameter, so the previous `asOfDate` argument
+// was silently ignored — point-in-time variants would need a new endpoint.
+export const getBalanceSheetReport = () => axios.get(`${API}/reports/balance-sheet`);
+export const getTrialBalanceReport = () => axios.get(`${API}/reports/trial-balance`);
 
 // Export
 export const exportReport = (reportType, format = "csv", params = {}) => {
@@ -205,9 +206,9 @@ export const getS3Settings = () => axios.get(`${API}/settings/s3`);
 export const saveS3Settings = (data) => axios.post(`${API}/settings/s3`, data);
 export const testS3Connection = (data) => axios.post(`${API}/settings/s3/test`, data);
 
-// Backup
-export const getS3Config = () => axios.get(`${API}/backup/config`);
-export const updateS3Config = (data) => axios.put(`${API}/backup/config`, data);
+// Backup. Note: S3 credential config lives under /settings/s3 (see above) —
+// the previous getS3Config/updateS3Config exports pointed at a /backup/config
+// route that doesn't exist on the backend; removed.
 export const createBackup = () => axios.post(`${API}/backup/create`);
 export const listBackups = () => axios.get(`${API}/backup/list`);
 export const restoreBackup = (filename) => axios.post(`${API}/backup/restore/${filename}`);
