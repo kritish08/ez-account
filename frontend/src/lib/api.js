@@ -46,6 +46,16 @@ export const formatDate = (dateStr) => {
 // Auth
 export const getAuthConfig = () => axios.get(`${API}/auth/config`);
 
+// WebAuthn / Passkey
+export const registerPasskeyBegin = () => axios.post(`${API}/auth/passkey/register/begin`);
+export const registerPasskeyComplete = (data) => axios.post(`${API}/auth/passkey/register/complete`, data);
+export const authenticatePasskeyBegin = (email) => axios.post(`${API}/auth/passkey/authenticate/begin`, { email });
+export const authenticatePasskeyComplete = (email, credentialData) =>
+  axios.post(`${API}/auth/passkey/authenticate/complete`, { email, credential_data: credentialData });
+export const getPasskeys = () => axios.get(`${API}/auth/passkeys`);
+export const deletePasskey = (id) => axios.delete(`${API}/auth/passkeys/${encodeURIComponent(id)}`);
+export const renamePasskey = (id, name) => axios.patch(`${API}/auth/passkeys/${encodeURIComponent(id)}`, { name });
+
 // Business
 export const getBusiness = () => axios.get(`${API}/business`);
 export const setupBusiness = (data) => axios.post(`${API}/business/setup`, data);

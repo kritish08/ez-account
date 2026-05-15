@@ -11,7 +11,13 @@ import {
   resetSystem,
   getSystemSettings,
   updateSystemSettings,
+  registerPasskeyBegin,
+  registerPasskeyComplete,
+  getPasskeys,
+  deletePasskey,
+  renamePasskey,
 } from "../lib/api";
+import { WebAuthnService } from "../lib/WebAuthnService";
 import { useModules } from "../context/ModulesContext";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -55,6 +61,10 @@ import {
   FileUp,
   Package,
   Trash2,
+  Fingerprint,
+  Smartphone,
+  Pencil,
+  Info,
 } from "lucide-react";
 import { Switch } from "../components/ui/switch";
 
@@ -98,9 +108,78 @@ const Settings = () => {
   const [resetting, setResetting] = useState(false);
   const RESET_PHRASE = "DELETE ALL ACCOUNTING DATA";
 
+  // ----- Passkeys -----
+  const [userPasskeys, setUserPasskeys] = useState([]);
+  const [loadingPasskeys, setLoadingPasskeys] = useState(false);
+  const [registeringPasskey, setRegisteringPasskey] = useState(false);
+  const [renamingPk, setRenamingPk] = useState(null);
+  const [newPkName, setNewPkName] = useState("");
+
   useEffect(() => {
     fetchSettings();
+    loadPasskeys();
   }, []);
+
+  const loadPasskeys = async () => {
+    setLoadingPasskeys(true);
+    try {
+      const response = await getPasskeys();
+      setUserPasskeys(response.data || []);
+    } catch (err) {
+      console.error("Failed to load passkeys:", err);
+    } finally {
+      setLoadingPasskeys(false);
+    }
+  };
+
+  const handleRegisterPasskey = async () => {
+    if (!WebAuthnService.isSupported()) {
+      toast.error("Passkeys aren't supported on this browser or device.");
+      return;
+    }
+    setRegisteringPasskey(true);
+    try {
+      const response = await registerPasskeyBegin();
+      const credential = await WebAuthnService.register(response.data);
+      await registerPasskeyComplete({ registration_data: credential });
+      toast.success("Passkey registered");
+      loadPasskeys();
+    } catch (error) {
+      console.error("Passkey registration failed:", error);
+      // WebAuthn typically requires a secure context (HTTPS or localhost);
+      // surface that hint when the browser refuses.
+      toast.error(
+        error.response?.data?.detail
+          || error.message
+          || "Passkey registration failed. Make sure you're on HTTPS or localhost."
+      );
+    } finally {
+      setRegisteringPasskey(false);
+    }
+  };
+
+  const handleDeletePasskey = async (id) => {
+    try {
+      await deletePasskey(id);
+      toast.success("Passkey removed");
+      loadPasskeys();
+    } catch {
+      toast.error("Failed to remove passkey");
+    }
+  };
+
+  const handleRenamePasskey = async () => {
+    if (!renamingPk || !newPkName.trim()) return;
+    try {
+      await renamePasskey(renamingPk.id, newPkName.trim());
+      toast.success("Passkey renamed");
+      setRenamingPk(null);
+      setNewPkName("");
+      loadPasskeys();
+    } catch {
+      toast.error("Failed to rename passkey");
+    }
+  };
 
   const handleVoiceToggle = (checked) => {
     setVoiceAssistantEnabled(checked);
@@ -397,6 +476,119 @@ const Settings = () => {
 
         </CardContent>
       </Card>
+
+      {/* Security & Passkeys */}
+      <Card className="border-brand-200 bg-brand-50/20 shadow-sm overflow-hidden">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-brand-600" />
+            Security & Passkeys
+          </CardTitle>
+          <CardDescription>Biometric / hardware-key login. Replaces passwords with a private key that never leaves your device.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 border rounded-lg bg-white shadow-sm gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center">
+                <Fingerprint className="h-5 w-5 text-brand-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-slate-900">Add this device</p>
+                <p className="text-sm text-slate-500">Use Face ID, Touch ID, Windows Hello, or a hardware security key</p>
+              </div>
+            </div>
+            <Button
+              onClick={handleRegisterPasskey}
+              disabled={registeringPasskey}
+              className="bg-brand-600 hover:bg-brand-700 whitespace-nowrap shadow-sm"
+              data-testid="passkey-register-btn"
+            >
+              {registeringPasskey ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Initialising...</>
+              ) : (
+                "Register This Device"
+              )}
+            </Button>
+          </div>
+
+          {userPasskeys.length > 0 && (
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-slate-700 px-1">Registered devices</h4>
+              <div className="border rounded-lg bg-white divide-y shadow-sm">
+                {userPasskeys.map((pk) => (
+                  <div key={pk.id} className="flex items-center justify-between p-3.5 group hover:bg-slate-50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <Smartphone className="h-5 w-5 text-slate-400 group-hover:text-brand-500 transition-colors" />
+                      <div>
+                        <p className="text-sm font-medium text-slate-900">{pk.name || "Biometric Device"}</p>
+                        <p className="text-xs text-slate-500">
+                          Added {pk.created_at ? new Date(pk.created_at).toLocaleDateString() : "—"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => { setRenamingPk(pk); setNewPkName(pk.name || ""); }}
+                        className="text-slate-400 hover:text-brand-600 h-8 w-8"
+                        title="Rename"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDeletePasskey(pk.id)}
+                        className="text-slate-400 hover:text-red-600 hover:bg-red-50 h-8 w-8"
+                        title="Remove"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {loadingPasskeys && userPasskeys.length === 0 && (
+            <div className="space-y-2">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </div>
+          )}
+
+          <div className="flex items-start gap-2 text-xs text-slate-500 bg-brand-50/50 p-3 rounded-lg border border-brand-100">
+            <Info className="h-4 w-4 text-brand-500 mt-0.5 flex-shrink-0" />
+            <p>
+              Passkeys replace passwords with a cryptographic key. Even if the server is breached,
+              your private key never leaves this device. Requires HTTPS (or localhost) and a browser
+              with WebAuthn support.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={!!renamingPk} onOpenChange={(v) => !v && setRenamingPk(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename Passkey</DialogTitle>
+            <DialogDescription>Give this passkey a friendly name to identify which device it lives on.</DialogDescription>
+          </DialogHeader>
+          <Input
+            value={newPkName}
+            onChange={(e) => setNewPkName(e.target.value)}
+            placeholder="e.g. My MacBook"
+            onKeyDown={(e) => e.key === "Enter" && handleRenamePasskey()}
+            autoFocus
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRenamingPk(null)}>Cancel</Button>
+            <Button onClick={handleRenamePasskey} className="bg-brand-600 hover:bg-brand-700">Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* S3 Configuration */}
       <Card>
