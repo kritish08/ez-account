@@ -1,0 +1,61 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # mongodb-atlas-local exposes a single-member replica set, which the
+      # record_payment transaction needs (single-node mongods reject
+      # start_transaction). Atlas itself is also a replica set in prod.
+      mongo:
+        image: quay.io/mongodb/mongodb-atlas-local:latest
+        ports:
+          - 27017:27017
+
+    env:
+      MONGO_URL: mongodb://localhost:27017/?directConnection=true
+      JWT_SECRET: ci-jwt-secret-not-for-prod
+      MASTER_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      CORS_ORIGINS: http://localhost
+      AZURE_OPENAI_ENDPOINT: https://placeholder.openai.azure.com/
+      AZURE_OPENAI_KEY: placeholder
+      DEPLOYMENT_NAME_GPT52: gpt-5.2
+      DEPLOYMENT_NAME_WHISPER: whisper
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Wait for Mongo replica set
+        env:
+          MONGO_SERVICE_ID: ${{ job.services.mongo.id }}
+        run: |
+          for i in {1..30}; do
+            if docker exec "$MONGO_SERVICE_ID" mongosh --quiet --eval 'rs.status().ok' 2>/dev/null | grep -q 1; then
+              echo "RS ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "RS did not come up"; exit 1
+
+      - name: Run pytest
+        working-directory: backend
+        run: pytest -v
