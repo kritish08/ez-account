@@ -21,3 +21,12 @@ class PaymentUpdate(BaseModel):
     mode: str
     date: Optional[str] = None
     notes: Optional[str] = None
+
+
+class SupplierPaymentCreate(BaseModel):
+    supplier_id: str
+    amount: float = Field(..., gt=0)
+    mode: str
+    date: Optional[str] = None
+    notes: Optional[str] = None
+    purchase_id: Optional[str] = None  # optional bill-by-bill linkage
