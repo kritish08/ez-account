@@ -21,7 +21,7 @@ from app.database import db
 from app.deps import get_current_user
 from app.services.ledger import get_account_balance
 from app.services.money import _money
-from app.services.stock import get_product_stock
+from app.services.stock import get_all_product_stock
 
 router = APIRouter(prefix="/api", tags=["reports"])
 
@@ -170,11 +170,12 @@ async def report_cash_bank(current_user: dict = Depends(get_current_user)):
 async def report_inventory(current_user: dict = Depends(get_current_user)):
     """Product stock report."""
     products = await db.products.find({}, {"_id": 0}).to_list(None)
+    stock_map = await get_all_product_stock()
     report = []
     total_value = 0
 
     for product in products:
-        stock = await get_product_stock(product["id"])
+        stock = stock_map.get(product["id"], 0)
         value = stock * product.get("cost_price", 0)
         report.append({
             "product_id": product["id"],
@@ -196,12 +197,13 @@ async def report_inventory(current_user: dict = Depends(get_current_user)):
 async def report_inventory_by_type(current_user: dict = Depends(get_current_user)):
     """Inventory grouped by item type (Raw Material, WIP, Finished Good)."""
     products = await db.products.find({}, {"_id": 0}).to_list(None)
+    stock_map = await get_all_product_stock()
     summary = {}
     details = []
     total_value = 0
 
     for product in products:
-        stock = await get_product_stock(product["id"])
+        stock = stock_map.get(product["id"], 0)
         item_type = product.get("item_type", "FINISHED_GOOD")
         value = stock * product.get("cost_price", 0)
 
@@ -231,10 +233,11 @@ async def report_inventory_by_type(current_user: dict = Depends(get_current_user
 async def report_low_stock(current_user: dict = Depends(get_current_user)):
     """Low stock report."""
     products = await db.products.find({}, {"_id": 0}).to_list(None)
+    stock_map = await get_all_product_stock()
     report = []
 
     for product in products:
-        stock = await get_product_stock(product["id"])
+        stock = stock_map.get(product["id"], 0)
         threshold = product.get("low_stock_threshold", 10)
         if stock < threshold:
             report.append({
@@ -278,18 +281,29 @@ async def report_stock_movement(product_id: Optional[str] = None, start_date: Op
 @router.get("/reports/batch-traceability")
 async def report_batch_traceability(current_user: dict = Depends(get_current_user)):
     """Batch Traceability & Expiry Report."""
-    products = await db.products.find({"track_batches": True}, {"_id": 0}).to_list(None)
-    report = []
-    for product in products:
-        batches = await db.batches.find({"product_id": product["id"], "current_stock": {"$gt": 0}}, {"_id": 0}).to_list(100)
-        for b in batches:
-            report.append({
-                "product_id": product["id"],
-                "product_name": product["name"],
-                "batch_number": b["batch_number"],
-                "expiry_date": b.get("expiry_date"),
-                "current_stock": b["current_stock"]
-            })
+    products = await db.products.find(
+        {"track_batches": True},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(None)
+    if not products:
+        return {"report": []}
+
+    name_map = {p["id"]: p["name"] for p in products}
+    # One query against batches instead of one per product. The `$in` filter
+    # uses the existing (product_id, batch_number) compound index for lookup.
+    batches = await db.batches.find(
+        {"product_id": {"$in": list(name_map.keys())}, "current_stock": {"$gt": 0}},
+        {"_id": 0},
+    ).to_list(None)
+
+    report = [{
+        "product_id": b["product_id"],
+        "product_name": name_map.get(b["product_id"], "Unknown"),
+        "batch_number": b["batch_number"],
+        "expiry_date": b.get("expiry_date"),
+        "current_stock": b["current_stock"],
+    } for b in batches]
+
     report.sort(key=lambda x: str(x.get("expiry_date") or "9999-12-31"))
     return {"report": report}
 
@@ -306,9 +320,31 @@ async def report_production_yield(current_user: dict = Depends(get_current_user)
     / quantity_required).
     """
     orders = await db.production_orders.find({"status": "COMPLETED"}, {"_id": 0}).sort("completed_at", -1).to_list(100)
+    if not orders:
+        return {"report": []}
+
+    # Batch-fetch every product (finished good + raw material) referenced by
+    # any order in one query — was previously a deep N+1 (one query per order
+    # plus one per ingredient, ~600 queries for 100 orders × 5 ingredients).
+    needed_ids: set[str] = set()
+    for order in orders:
+        if order.get("product_id"):
+            needed_ids.add(order["product_id"])
+        for ing in order.get("ingredients", []):
+            if ing.get("material_id"):
+                needed_ids.add(ing["material_id"])
+
+    product_map = {}
+    if needed_ids:
+        async for p in db.products.find(
+            {"id": {"$in": list(needed_ids)}},
+            {"_id": 0, "id": 1, "name": 1, "cost_price": 1},
+        ):
+            product_map[p["id"]] = p
+
     report = []
     for order in orders:
-        product = await db.products.find_one({"id": order.get("product_id")}, {"_id": 0, "name": 1, "cost_price": 1})
+        product = product_map.get(order.get("product_id"))
         if not product:
             continue
         qty = order.get("quantity", 0)
@@ -316,7 +352,7 @@ async def report_production_yield(current_user: dict = Depends(get_current_user)
         raw_material_cost = 0.0
         for ing in order.get("ingredients", []):
             consumed = ing.get("quantity_consumed") or ing.get("quantity_required", 0)
-            mat = await db.products.find_one({"id": ing.get("material_id")}, {"_id": 0, "cost_price": 1})
+            mat = product_map.get(ing.get("material_id"))
             unit_cost = mat.get("cost_price", 0) if mat else 0
             raw_material_cost += _money(consumed * unit_cost)
         raw_material_cost = _money(raw_material_cost)
