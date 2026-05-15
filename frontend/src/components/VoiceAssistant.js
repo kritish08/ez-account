@@ -77,6 +77,19 @@ const VoiceAssistantInner = () => {
                     timestamp: new Date()
                 }]);
             } else if (data.type === 'response') {
+                // Show what the model heard back (only for voice turns —
+                // text turns send their own message via the input box, so
+                // echoing the transcript there would double up).
+                if (data.transcript) {
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            role: 'user',
+                            content: data.transcript,
+                            timestamp: new Date()
+                        }
+                    ]);
+                }
                 setMessages(prev => [
                     ...prev,
                     {
@@ -91,6 +104,16 @@ const VoiceAssistantInner = () => {
                     setDraft(data.draft);
                 }
                 setSessionState(data.state);
+                setIsProcessing(false);
+            } else if (data.type === 'transcription_failed') {
+                setMessages(prev => [
+                    ...prev,
+                    {
+                        role: 'error',
+                        content: data.message || 'Could not transcribe audio. Try again.',
+                        timestamp: new Date()
+                    }
+                ]);
                 setIsProcessing(false);
             } else if (data.type === 'error') {
                 setMessages(prev => [
@@ -206,31 +229,60 @@ const VoiceAssistantInner = () => {
             };
 
             mediaRecorder.current.onstop = async () => {
-                // Voice transcription is not yet wired end-to-end. We
-                // deliberately discard the recorded audio here rather than
-                // sending a misleading hardcoded demo string (which is what
-                // the previous implementation did — every voice command
-                // created the same dummy invoice regardless of what the user
-                // said). Surface that honestly to the user instead.
-                setMessages(prev => [
-                    ...prev,
-                    {
-                        role: 'error',
-                        content: 'Voice transcription is not yet available in this build. '
-                               + 'Please use the buttons/forms in the app, or disable Voice Assistant in Settings.',
-                        timestamp: new Date()
-                    }
-                ]);
-                setIsProcessing(false);
-
-                // Stop visualization
+                // Stop visualization + release the mic before any network work.
                 if (animationFrame.current) {
                     cancelAnimationFrame(animationFrame.current);
                 }
                 setAudioLevel(0);
-
-                // Stop all tracks
                 stream.getTracks().forEach(track => track.stop());
+
+                const chunks = audioChunks.current;
+                audioChunks.current = [];
+                if (!chunks.length) {
+                    return;
+                }
+
+                if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            role: 'error',
+                            content: 'Voice connection lost. Please reopen the assistant.',
+                            timestamp: new Date()
+                        }
+                    ]);
+                    return;
+                }
+
+                try {
+                    setIsProcessing(true);
+                    const blob = new Blob(chunks, { type: 'audio/webm' });
+                    // FileReader → data URL → strip the `data:...;base64,` prefix.
+                    // Smaller code than rolling our own ArrayBuffer→base64 loop.
+                    const dataUrl = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(blob);
+                    });
+                    const b64 = String(dataUrl).split(',')[1] || '';
+                    ws.current.send(JSON.stringify({
+                        type: 'audio',
+                        audio: b64,
+                        mime: 'audio/webm'
+                    }));
+                } catch (err) {
+                    console.error('Failed to send audio:', err);
+                    setIsProcessing(false);
+                    setMessages(prev => [
+                        ...prev,
+                        {
+                            role: 'error',
+                            content: 'Failed to send audio. Please try again.',
+                            timestamp: new Date()
+                        }
+                    ]);
+                }
             };
 
             mediaRecorder.current.start();
@@ -412,10 +464,9 @@ const VoiceAssistantInner = () => {
 };
 
 const VoiceAssistant = () => {
-    // Voice assistant is OFF by default until transcription is wired end-to-end.
-    // The current recording flow discards audio and was sending a hardcoded
-    // demo string — users were getting a fake-working feature. Keeping it
-    // gated behind explicit opt-in in Settings prevents shipping that façade.
+    // Gated behind a Settings toggle (`voiceAssistantEnabled` in localStorage,
+    // mirrors the `enable_voice` flag in /settings/modules). Default off so
+    // tenants without configured Azure creds don't see a broken mic button.
     const [isEnabled, setIsEnabled] = useState(
         () => localStorage.getItem('voiceAssistantEnabled') === 'true'
     );

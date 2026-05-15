@@ -5,14 +5,20 @@ Manages multiple concurrent voice assistant sessions.
 Each user gets their own isolated session.
 """
 
+import asyncio
+import base64
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
+
 from fastapi import WebSocket
-from .voice_session import VoiceSession
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from .function_executor import FunctionExecutor
 from .voice_ai_handler import VoiceAIHandler
-from motor.motor_asyncio import AsyncIOMotorDatabase
-import asyncio
-from datetime import datetime, timedelta, timezone
+from .voice_session import VoiceSession
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketSessionManager:
@@ -124,12 +130,57 @@ class WebSocketSessionManager:
             }
         
         elif message_type == "audio":
-            # Audio chunk (for future implementation)
-            # For now, return placeholder
+            # Client sends a single utterance as base64 in `audio`, with an
+            # optional `mime` hint (defaults to audio/webm — what Chrome's
+            # MediaRecorder emits). We transcribe, then route the resulting
+            # text through the same GPT path as a text message so all the
+            # downstream function-calling, draft state, and error handling
+            # behaves identically regardless of input modality.
+            b64 = message_data.get("audio", "")
+            mime = message_data.get("mime", "audio/webm")
+            if not b64:
+                return {
+                    "type": "error",
+                    "error": "empty_audio",
+                    "message": "No audio payload received."
+                }
+            try:
+                audio_bytes = base64.b64decode(b64, validate=True)
+            except (ValueError, TypeError):
+                return {
+                    "type": "error",
+                    "error": "bad_audio_encoding",
+                    "message": "Audio payload was not valid base64."
+                }
+
+            try:
+                transcript = await self.ai_handler.transcribe_audio(audio_bytes, mime)
+            except Exception as e:
+                logger.exception("Voice transcription failed for user=%s", user_id)
+                return {
+                    "type": "transcription_failed",
+                    "error": "transcription_error",
+                    "message": f"Transcription failed: {e}"
+                }
+
+            if not transcript:
+                # Empty transcript usually means silence or unintelligible
+                # audio — surface that to the client so the UI can prompt
+                # the user to retry rather than spinning forever.
+                return {
+                    "type": "transcription_failed",
+                    "error": "empty_transcript",
+                    "message": "Couldn't hear anything — please try again."
+                }
+
+            result = await self.ai_handler.process_message(transcript, session, executor)
             return {
-                "type": "error",
-                "error": "not_implemented",
-                "message": "Audio streaming coming soon! Use text for now."
+                "type": "response",
+                "transcript": transcript,
+                "response": result["message"],
+                "function_called": result.get("function_called"),
+                "draft": result.get("draft"),
+                "state": session.state.value
             }
         
         else:
