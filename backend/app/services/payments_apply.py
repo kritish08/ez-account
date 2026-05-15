@@ -107,7 +107,12 @@ async def apply_credit_to_invoice(customer_id: str, invoice_id: str, invoice_tot
     if available_credit <= 0:
         return invoice_total, 0
 
-    allocations = await db.payment_allocations.find({"invoice_id": invoice_id}).to_list(None)
+    # Only the `amount` field is used; project to keep the round-trip light
+    # and avoid pulling Mongo's ObjectId into application memory.
+    allocations = await db.payment_allocations.find(
+        {"invoice_id": invoice_id},
+        {"_id": 0, "amount": 1},
+    ).to_list(None)
     cash_paid = sum(a["amount"] for a in allocations)
     needed_amount = max(0, invoice_total - cash_paid)
     credit_applied = min(available_credit, needed_amount)
