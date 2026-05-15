@@ -61,12 +61,17 @@ async def update_modules_settings(settings: ModulesSettings, current_user: dict 
     return {"message": "Module settings updated successfully"}
 
 
+# Placeholder shown in place of the real S3 secret in GET responses. When
+# the client POSTs back this exact string, the server treats it as "keep
+# the existing secret" rather than persisting the mask.
+_S3_SECRET_MASK = "********"
+
+
 @router.get("/settings/s3")
 async def get_s3_settings(current_user: dict = Depends(get_current_user)):
     settings = await db.settings.find_one({"type": "s3"}, {"_id": 0})
     if settings:
-        # Mask the secret key
-        settings["aws_secret_access_key"] = "********" if settings.get("aws_secret_access_key") else ""
+        settings["aws_secret_access_key"] = _S3_SECRET_MASK if settings.get("aws_secret_access_key") else ""
     return settings or {"configured": False}
 
 
@@ -76,11 +81,21 @@ async def save_s3_settings(settings: S3Settings, current_user: dict = Depends(ge
     # doesn't drag botocore in at import time.
     from botocore.exceptions import ClientError, NoCredentialsError  # noqa: PLC0415
 
+    # If the client sent back the mask, they're editing other fields and
+    # want to keep the previously-saved secret. Look it up; refuse if
+    # there's no prior secret to preserve.
+    secret = settings.aws_secret_access_key
+    if secret == _S3_SECRET_MASK:
+        existing = await db.settings.find_one({"type": "s3"}, {"_id": 0, "aws_secret_access_key": 1})
+        if not existing or not existing.get("aws_secret_access_key"):
+            raise HTTPException(status_code=400, detail="Cannot save: no existing secret to preserve. Provide aws_secret_access_key.")
+        secret = existing["aws_secret_access_key"]
+
     try:
         s3_client = boto3.client(
             's3',
             aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
+            aws_secret_access_key=secret,
             region_name=settings.region
         )
         s3_client.head_bucket(Bucket=settings.bucket_name)
@@ -97,6 +112,7 @@ async def save_s3_settings(settings: S3Settings, current_user: dict = Depends(ge
     settings_doc = {
         "type": "s3",
         **settings.model_dump(),
+        "aws_secret_access_key": secret,
         "configured": True,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
@@ -110,11 +126,20 @@ async def test_s3_connection(settings: S3Settings, current_user: dict = Depends(
     """Test S3 connection without saving."""
     from botocore.exceptions import ClientError, NoCredentialsError  # noqa: PLC0415
 
+    # Same mask handling as save: testing with the masked secret means
+    # "test the currently-stored creds with these other field values".
+    secret = settings.aws_secret_access_key
+    if secret == _S3_SECRET_MASK:
+        existing = await db.settings.find_one({"type": "s3"}, {"_id": 0, "aws_secret_access_key": 1})
+        if not existing or not existing.get("aws_secret_access_key"):
+            return {"success": False, "message": "No stored secret to test against. Provide aws_secret_access_key."}
+        secret = existing["aws_secret_access_key"]
+
     try:
         s3_client = boto3.client(
             's3',
             aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
+            aws_secret_access_key=secret,
             region_name=settings.region
         )
         s3_client.head_bucket(Bucket=settings.bucket_name)
