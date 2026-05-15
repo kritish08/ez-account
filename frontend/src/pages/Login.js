@@ -5,16 +5,18 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { toast } from "sonner";
-import { Eye, EyeOff, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2, Fingerprint } from "lucide-react";
 
-import { getAuthConfig } from "../lib/api";
+import { getAuthConfig, authenticatePasskeyBegin } from "../lib/api";
+import { WebAuthnService } from "../lib/WebAuthnService";
 
 const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
+  const { login, passkeyLogin } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
@@ -33,6 +35,34 @@ const Login = () => {
       toast.error(error.response?.data?.detail || "Login failed. Please check your credentials.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Passkey flow: email is required so the server can return only this
+  // user's registered credentials; the browser then triggers the platform
+  // authenticator (Face ID / Touch ID / Windows Hello / hardware key).
+  const handlePasskeyLogin = async () => {
+    if (!email) {
+      toast.error("Please enter your email to sign in with a passkey");
+      return;
+    }
+    if (!WebAuthnService.isSupported()) {
+      toast.error("Passkeys are not supported on this browser or device.");
+      return;
+    }
+
+    setPasskeyLoading(true);
+    try {
+      const response = await authenticatePasskeyBegin(email);
+      const assertion = await WebAuthnService.authenticate(response.data);
+      await passkeyLogin(email, assertion);
+      toast.success("Welcome back!");
+      navigate("/");
+    } catch (error) {
+      console.error("Passkey authentication failed:", error);
+      toast.error(error.response?.data?.detail || "Passkey login failed. Use your password instead.");
+    } finally {
+      setPasskeyLoading(false);
     }
   };
 
@@ -114,6 +144,30 @@ const Login = () => {
                 </>
               ) : (
                 "Sign in"
+              )}
+            </Button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t border-slate-200" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase text-slate-500">
+                <span className="bg-slate-50 px-2">Or continue with</span>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full h-11 border-brand-200 text-brand-700 hover:bg-brand-50"
+              onClick={handlePasskeyLogin}
+              disabled={passkeyLoading}
+              data-testid="login-passkey-btn"
+            >
+              {passkeyLoading ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Approving...</>
+              ) : (
+                <><Fingerprint className="mr-2 h-4 w-4" />Sign in with Passkey</>
               )}
             </Button>
           </form>

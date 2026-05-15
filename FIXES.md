@@ -1122,6 +1122,72 @@ Aligned `Settings.js` to use the same `=== 'true'` semantics as `VoiceAssistant.
 
 ---
 
+## PASSKEY-WEBAUTHN — Biometric / hardware-key login ported from server  🔬
+
+**Severity:** Feature add (was developed only on the production server, missing from git)
+**Files:**
+- `backend/server.py` (imports, RP config, 4 Pydantic models, 7 endpoints, 2 helpers, 4 indexes)
+- `backend/requirements.txt` (+ `fido2>=1.2.0,<3`)
+- `frontend/src/lib/WebAuthnService.js` (new, 120 lines)
+- `frontend/src/lib/api.js` (+ 7 functions)
+- `frontend/src/context/AuthContext.js` (+ `passkeyLogin`)
+- `frontend/src/pages/Login.js` (+ passkey button under password sign-in)
+- `frontend/src/pages/Settings.js` (+ enrollment + management card)
+
+### Context
+The deployed production server had a working WebAuthn / passkey flow that was never committed to git — confirmed by searching all branches and unreachable commits. User dropped a tarball of the server's current state; this entry merges only the passkey-related additions on top of all 79 audit fixes already on `main`.
+
+### Backend
+- **`fido2` library** added (>=1.2.0, picks up 2.x which works with the latest `cryptography==46`).
+- **Configuration** via env: `WEBAUTHN_RP_ID` (defaults `localhost` for dev), `WEBAUTHN_RP_NAME` (defaults `EZ Accounts`).
+- **Endpoints:**
+  - `POST /api/auth/passkey/register/begin` — authed; returns the WebAuthn challenge, persists the state in `db.webauthn_states` (5-min TTL via auto-cleanup index).
+  - `POST /api/auth/passkey/register/complete` — verifies the attestation, stores the credential under `users.passkeys[]`, blocks duplicate registrations of the same hardware key. Generic 400 on bad input (no library-internal leakage).
+  - `POST /api/auth/passkey/authenticate/begin` — public; returns an assertion challenge restricted to the user's registered credential ids.
+  - `POST /api/auth/passkey/authenticate/complete` — verifies challenge + RP ID + user-verification + signature + replay counter; updates `sign_count`; issues a normal JWT identical to password login.
+  - `GET /api/auth/passkeys` — authed; lists the current user's registered passkeys. Strips `public_key` from the response (UI doesn't need it).
+  - `DELETE /api/auth/passkeys/{credential_id}` — authed; `$pull`s the passkey by id.
+  - `PATCH /api/auth/passkeys/{credential_id}` — authed; renames a passkey for UI identification.
+- **Indexes** added in lifespan:
+  - `webauthn_states.expires_at` with `expireAfterSeconds=0` — auto-cleans stale handshake state on the 5-minute window.
+  - Compound `(user_id, type)` and `(email, type)` for fast lookup.
+  - `users.passkeys.id` partial — fast credential lookup during authentication.
+
+### Frontend
+- **`WebAuthnService.js`** copied verbatim from the server snapshot — handles ArrayBuffer ↔ base64 conversions for the browser's `navigator.credentials.create()` / `.get()`.
+- **Login page** now shows a divider and a "Sign in with Passkey" button under the password submit. Clicking it requires the email field (so the server can scope to that user's credentials), then triggers the platform authenticator (Face ID / Touch ID / Windows Hello / hardware key) and POSTs the assertion.
+- **Settings page** has a new "Security & Passkeys" card with a "Register This Device" CTA, a list of registered devices with rename / remove actions, and a help blurb.
+- **AuthContext** got a `passkeyLogin(email, credential)` method that mirrors the password `login` path's token-acceptance step.
+
+### Verified (live smoke against the running stack)
+```
+[POST  ] /auth/passkey/register/begin                       → HTTP 200
+[POST  ] /auth/passkey/register/complete                    → HTTP 422  (Pydantic body shape — expected)
+[POST  ] /auth/passkey/authenticate/begin                   → HTTP 404  (no passkey registered yet)
+[POST  ] /auth/passkey/authenticate/complete                → HTTP 422
+[GET   ] /auth/passkeys                                     → HTTP 200  (returns [])
+[DELETE] /auth/passkeys/xyz                                 → HTTP 200  (idempotent $pull)
+[PATCH ] /auth/passkeys/xyz                                 → HTTP 200
+
+✓ register/begin returns valid challenge {rp: {id: localhost}, attestation: none,
+   authenticatorSelection: {attachment: platform, userVerification: required}}
+✓ State persisted to db.webauthn_states with expires_at = now + 5min
+✓ TTL index (expires_at, expireAfterSeconds=0) in place — auto-cleans stale state
+✓ authenticate/begin on user with no passkey → 404
+✓ register/complete with garbage attestation → 400 (sanitized message, no library leakage)
+✓ unauthenticated register/begin → 403
+```
+
+### Browser-side test (manual)
+Open `http://localhost:8080`, log in with `test@best.com` / `password_123`, go to **Settings → Security & Passkeys → "Register This Device"** — your OS biometric prompt should appear. After registration, log out, type your email, hit **"Sign in with Passkey"** — biometric prompt → straight into the app, no password entered. The new device shows up under the Settings card with rename / remove buttons.
+
+### Notes
+- **localhost is a secure context** per the WebAuthn spec — works over HTTP without certificates. For any non-localhost deploy, HTTPS is required (the browser will refuse the API call otherwise).
+- For production, set `WEBAUTHN_RP_ID=ezaccounts.zerp.me` (no scheme, no port) in `backend/.env`. RP ID must match what the browser sees in the address bar.
+- The voice-assistant changes from this audit branch are preserved — the snapshot's older version was older code, so we only pulled the passkey diff.
+
+---
+
 # Deferred — Known issues NOT fixed in this pass
 
 Listed so they aren't forgotten. Each will need its own scoped session.
