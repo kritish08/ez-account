@@ -21,6 +21,7 @@ Supplier payments:
   by subtracting the payment amount.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -274,11 +275,14 @@ async def delete_payment(payment_id: str, current_user: dict = Depends(get_curre
                 {"$set": {"paid_amount": new_paid, "status": new_status}}
             )
 
-    await db.payment_allocations.delete_many({"payment_id": payment_id})
-
-    # Remove auto-generated credit notes and Advance Payments
-    await db.credit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True})
-    await db.advance_payments.delete_many({"payment_id": payment_id})
+    # Three independent collections — gather to overlap round-trips.
+    # credit_notes filter is narrowed to is_auto_generated rows so we
+    # don't touch manually-created CNs that happen to share a payment_id.
+    await asyncio.gather(
+        db.payment_allocations.delete_many({"payment_id": payment_id}),
+        db.credit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True}),
+        db.advance_payments.delete_many({"payment_id": payment_id}),
+    )
 
     await db.payments.delete_one({"id": payment_id})
     return {"message": "Payment voided and invoice balances reverted"}
@@ -392,14 +396,14 @@ async def delete_supplier_payment(payment_id: str, current_user: dict = Depends(
     if not existing:
         raise HTTPException(status_code=404, detail="Supplier payment not found")
 
-    # Reverse Ledger
-    await delete_ledger_entries("supplier_payment", payment_id)
-
-    # Remove associated Advance Payments
-    await db.advance_payments.delete_many({"payment_id": payment_id})
-
-    # Remove auto-generated Debit Notes created from overpayment detection
-    await db.debit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True})
+    # All three reversals target independent collections — gather to
+    # overlap round-trips. The overpayment branch may have created an
+    # auto-generated debit-note (see record_supplier_payment).
+    await asyncio.gather(
+        delete_ledger_entries("supplier_payment", payment_id),
+        db.advance_payments.delete_many({"payment_id": payment_id}),
+        db.debit_notes.delete_many({"payment_id": payment_id, "is_auto_generated": True}),
+    )
 
     await db.supplier_payments.delete_one({"id": payment_id})
     return {"message": "Supplier payment voided and balances reverted"}

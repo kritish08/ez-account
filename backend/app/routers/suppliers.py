@@ -7,6 +7,7 @@ the supplier, then sweeps the opening-balance setup entries so the
 trial balance stays clean.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -144,19 +145,21 @@ async def delete_supplier(supplier_id: str, current_user: dict = Depends(get_cur
     if not existing:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
-    # Check for ALL dependencies, not just purchases. Previously only the
-    # purchases collection was checked, so a supplier with debit notes or
-    # supplier payments would be deleted with stale references left behind,
-    # plus the opening-balance ledger entries.
-    purchases = await db.purchases.count_documents({"supplier_id": supplier_id})
+    # Check for ALL dependencies in parallel (each count_documents was a
+    # separate round-trip; on the happy path all three are zero so they're
+    # free to overlap). Previously only the purchases collection was
+    # checked, so a supplier with debit notes or supplier payments would
+    # be deleted with stale references left behind, plus the opening-
+    # balance ledger entries.
+    purchases, debit_notes, sup_payments = await asyncio.gather(
+        db.purchases.count_documents({"supplier_id": supplier_id}),
+        db.debit_notes.count_documents({"supplier_id": supplier_id}),
+        db.supplier_payments.count_documents({"supplier_id": supplier_id}),
+    )
     if purchases > 0:
         raise HTTPException(status_code=400, detail="Cannot delete supplier with existing purchases")
-
-    debit_notes = await db.debit_notes.count_documents({"supplier_id": supplier_id})
     if debit_notes > 0:
         raise HTTPException(status_code=400, detail="Cannot delete supplier with existing debit notes")
-
-    sup_payments = await db.supplier_payments.count_documents({"supplier_id": supplier_id})
     if sup_payments > 0:
         raise HTTPException(status_code=400, detail="Cannot delete supplier with existing payments")
 
