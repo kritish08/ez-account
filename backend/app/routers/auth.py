@@ -23,7 +23,7 @@ from app.schemas.common import Token, UserLogin
 from app.schemas.webauthn import (
     WebAuthnAuthenticateBegin, WebAuthnAuthenticateComplete, WebAuthnRegisterComplete,
 )
-from app.services.auth import create_access_token, verify_password
+from app.services.auth import _DUMMY_PASSWORD_HASH, create_access_token, verify_password
 from app.services.passkey import _b64url_to_bytes, _rebuild_attested_credentials, fido_server
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,13 @@ router = APIRouter(prefix="/api", tags=["auth"])
 @router.post("/auth/login", response_model=Token)
 async def login(user: UserLogin):
     db_user = await db.users.find_one({"email": user.email}, {"_id": 0})
-    if not db_user or not verify_password(user.password, db_user["password_hash"]):
+    # Always run verify_password (against the user's hash if present, or a
+    # constant dummy hash if not) so the unknown-email branch takes the same
+    # time as the wrong-password branch. Without this, an attacker can
+    # enumerate valid emails by timing the response (~80ms vs <5ms).
+    stored_hash = db_user["password_hash"] if db_user else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(user.password, stored_hash)
+    if not db_user or not password_ok:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     access_token = create_access_token(data={"sub": db_user["id"]})

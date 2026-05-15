@@ -29,6 +29,13 @@ def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 
+# Pre-computed once at import for the no-such-user branch of login(): running
+# bcrypt against this dummy hash keeps the response time of "unknown email" and
+# "known email, wrong password" indistinguishable, so an attacker can't
+# enumerate valid emails by timing the response.
+_DUMMY_PASSWORD_HASH = get_password_hash("__no_such_user__")
+
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (
