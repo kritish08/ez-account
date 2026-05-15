@@ -190,19 +190,22 @@ async def record_payment(payment: PaymentCreate, current_user: dict = Depends(ge
             "date": payment_date,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        await db.advance_payments.insert_one(adv_doc)
         advance_payment_id = adv_id
 
-        # Advance payments sit on the customer's ledger as credit.
-        # Ref_type=payment so it rolls back with the parent payment on delete.
-        await create_ledger_entry(
-            account=f"customer:{payment.customer_id}",
-            debit=0,
-            credit=excess,
-            narration=f"Advance payment received via payment ...{payment_id[-8:]}",
-            ref_type="payment",
-            ref_id=payment_id,
-            date=payment_date
+        # Insert advance doc + post the customer-ledger credit in parallel.
+        # Different collections, no inter-dependency. Ref_type=payment on
+        # the ledger entry so it rolls back with the parent payment delete.
+        await asyncio.gather(
+            db.advance_payments.insert_one(adv_doc),
+            create_ledger_entry(
+                account=f"customer:{payment.customer_id}",
+                debit=0,
+                credit=excess,
+                narration=f"Advance payment received via payment ...{payment_id[-8:]}",
+                ref_type="payment",
+                ref_id=payment_id,
+                date=payment_date,
+            ),
         )
 
     return {
