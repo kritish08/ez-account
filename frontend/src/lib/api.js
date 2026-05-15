@@ -46,6 +46,13 @@ export const formatDate = (dateStr) => {
 // Auth
 export const getAuthConfig = () => axios.get(`${API}/auth/config`);
 
+// Health (no auth required)
+export const getHealth = () => axios.get(`${API}/health`);
+
+// Scheduled backup (cron config)
+export const getBackupSchedule = () => axios.get(`${API}/settings/backup/schedule`);
+export const updateBackupSchedule = (data) => axios.put(`${API}/settings/backup/schedule`, data);
+
 // WebAuthn / Passkey
 export const registerPasskeyBegin = () => axios.post(`${API}/auth/passkey/register/begin`);
 export const registerPasskeyComplete = (data) => axios.post(`${API}/auth/passkey/register/complete`, data);

@@ -16,6 +16,8 @@ import {
   getPasskeys,
   deletePasskey,
   renamePasskey,
+  getBackupSchedule,
+  updateBackupSchedule,
 } from "../lib/api";
 import { WebAuthnService } from "../lib/WebAuthnService";
 import { useModules } from "../context/ModulesContext";
@@ -115,10 +117,46 @@ const Settings = () => {
   const [renamingPk, setRenamingPk] = useState(null);
   const [newPkName, setNewPkName] = useState("");
 
+  // ----- Backup schedule (cron) -----
+  const [backupSchedule, setBackupSchedule] = useState({
+    enabled: false,
+    frequency: "daily",
+    time: "02:00",
+    timezone: "UTC",
+    day_of_week: 0,
+  });
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+
   useEffect(() => {
     fetchSettings();
     loadPasskeys();
+    loadBackupSchedule();
   }, []);
+
+  const loadBackupSchedule = async () => {
+    try {
+      const res = await getBackupSchedule();
+      if (res.data) setBackupSchedule(prev => ({ ...prev, ...res.data }));
+    } catch (err) {
+      console.error("Failed to load backup schedule:", err);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    setScheduleSaving(true);
+    try {
+      await updateBackupSchedule(backupSchedule);
+      toast.success(
+        backupSchedule.enabled
+          ? `Auto-backup scheduled (${backupSchedule.frequency} at ${backupSchedule.time} ${backupSchedule.timezone})`
+          : "Auto-backup disabled"
+      );
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Failed to save schedule");
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
 
   const loadPasskeys = async () => {
     setLoadingPasskeys(true);
@@ -744,6 +782,93 @@ const Settings = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Scheduled Backup */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Cloud className="h-5 w-5 text-brand-600" />
+            Automatic Backup Schedule
+          </CardTitle>
+          <CardDescription>
+            Run the encrypted S3 backup on a cron schedule. Requires S3 configured above and <code>MASTER_ENCRYPTION_KEY</code> set on the server.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between p-3 border rounded-lg bg-white">
+            <div>
+              <p className="font-medium text-slate-900">Enabled</p>
+              <p className="text-sm text-slate-500">When off, no automatic backups will run.</p>
+            </div>
+            <Switch
+              checked={backupSchedule.enabled}
+              onCheckedChange={(checked) => setBackupSchedule(s => ({ ...s, enabled: checked }))}
+              data-testid="backup-schedule-toggle"
+            />
+          </div>
+
+          {backupSchedule.enabled && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Frequency</Label>
+                <select
+                  className="w-full h-10 border rounded-md px-3 bg-white text-sm"
+                  value={backupSchedule.frequency}
+                  onChange={(e) => setBackupSchedule(s => ({ ...s, frequency: e.target.value }))}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+              </div>
+              {backupSchedule.frequency === "weekly" && (
+                <div className="space-y-2">
+                  <Label>Day of week</Label>
+                  <select
+                    className="w-full h-10 border rounded-md px-3 bg-white text-sm"
+                    value={backupSchedule.day_of_week}
+                    onChange={(e) => setBackupSchedule(s => ({ ...s, day_of_week: parseInt(e.target.value, 10) }))}
+                  >
+                    <option value={0}>Monday</option>
+                    <option value={1}>Tuesday</option>
+                    <option value={2}>Wednesday</option>
+                    <option value={3}>Thursday</option>
+                    <option value={4}>Friday</option>
+                    <option value={5}>Saturday</option>
+                    <option value={6}>Sunday</option>
+                  </select>
+                </div>
+              )}
+              <div className="space-y-2">
+                <Label>Time (HH:MM, 24h)</Label>
+                <Input
+                  type="time"
+                  value={backupSchedule.time}
+                  onChange={(e) => setBackupSchedule(s => ({ ...s, time: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Timezone</Label>
+                <Input
+                  placeholder="UTC, Asia/Kolkata, America/Los_Angeles, ..."
+                  value={backupSchedule.timezone}
+                  onChange={(e) => setBackupSchedule(s => ({ ...s, timezone: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <Button
+              onClick={handleSaveSchedule}
+              disabled={scheduleSaving}
+              className="bg-brand-600 hover:bg-brand-700"
+              data-testid="backup-schedule-save-btn"
+            >
+              {scheduleSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : "Save Schedule"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Danger Zone */}
       <Card className="border-red-200 border-dashed bg-red-50/30 mt-8">

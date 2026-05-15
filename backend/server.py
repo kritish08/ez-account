@@ -27,6 +27,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fido2.server import Fido2Server
 from fido2.webauthn import PublicKeyCredentialRpEntity
 from fido2 import cbor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 from dotenv import load_dotenv
 
 # Internal imports
@@ -120,6 +123,128 @@ async def _seed_counter_from_max(counter_name: str, coll_name: str, field: str, 
         )
     except Exception as e:
         logger.warning(f"Counter seed failed for {counter_name}: {e}")
+
+
+# ============== Scheduled-backup cron (APScheduler) ==============
+# Single module-level scheduler. Started in lifespan; the user's saved
+# schedule (if any) is loaded right after startup. The job re-uses the
+# existing backup pipeline so manual and scheduled backups produce
+# identical encrypted artifacts.
+scheduler = AsyncIOScheduler(timezone="UTC")
+
+
+async def scheduled_backup_job():
+    """Autonomous backup job triggered by the cron scheduler.
+
+    Reads S3 settings + master key from env/db, snapshots every business
+    collection, envelope-encrypts, and uploads. boto3's `put_object` is
+    synchronous, so we run it inside `asyncio.to_thread` to avoid blocking
+    the event loop for the duration of the upload (potentially many seconds).
+    """
+    logger.info("Scheduled backup job triggered.")
+    try:
+        if not MASTER_ENCRYPTION_KEY:
+            logger.error("Scheduled backup ABORTED: MASTER_ENCRYPTION_KEY not set.")
+            return
+
+        s3_settings = await db.settings.find_one({"type": "s3"}, {"_id": 0})
+        if not s3_settings or not s3_settings.get("configured"):
+            logger.warning("Scheduled backup SKIPPED: S3 not configured in Settings.")
+            return
+
+        # Same set of collections as the manual backup path.
+        collections = [
+            "users", "business", "customers", "products", "suppliers", "invoices",
+            "payments", "expenses", "purchases", "ledger", "stock_movements",
+            "payment_allocations", "supplier_payments",
+            "credit_notes", "debit_notes", "batches", "serial_numbers",
+            "bill_of_materials", "production_orders", "advance_payments", "settings",
+        ]
+        backup_data = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "version": "2.0",
+            "collections": {},
+        }
+        for collection in collections:
+            docs = await db[collection].find({}, {"_id": 0}).to_list(None)
+            backup_data["collections"][collection] = docs
+
+        json_data = json.dumps(backup_data).encode()
+        encrypted_package = encrypt_data(json_data, MASTER_ENCRYPTION_KEY)
+
+        backup_filename = f"auto_backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.enc"
+
+        def _s3_upload():
+            s3_client = boto3.client(
+                "s3",
+                aws_access_key_id=s3_settings["aws_access_key_id"],
+                aws_secret_access_key=s3_settings.get("aws_secret_access_key", ""),
+                region_name=s3_settings.get("region", "us-east-1"),
+            )
+            s3_client.put_object(
+                Bucket=s3_settings["bucket_name"],
+                Key=f"ez-accounts-backups/{backup_filename}",
+                Body=json.dumps(encrypted_package).encode(),
+                ContentType="application/json",
+            )
+
+        await asyncio.to_thread(_s3_upload)
+
+        await db.backup_logs.insert_one({
+            "id": str(uuid.uuid4()),
+            "filename": backup_filename,
+            "size_bytes": len(json_data),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "success",
+            "type": "scheduled",
+        })
+        logger.info(f"Scheduled backup completed: {backup_filename}")
+    except Exception as e:
+        logger.error(f"Scheduled backup failed: {e}", exc_info=True)
+        try:
+            await db.backup_logs.insert_one({
+                "id": str(uuid.uuid4()),
+                "filename": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "failed",
+                "error": str(e),
+                "type": "scheduled",
+            })
+        except Exception:
+            pass
+
+
+def apply_backup_schedule(config: dict):
+    """Remove the existing cron job (if any) and re-add it with the new config."""
+    scheduler.remove_all_jobs()
+    if not config.get("enabled"):
+        logger.info("Backup schedule disabled — no cron job registered.")
+        return
+
+    time_str = config.get("time", "00:00")
+    try:
+        hour, minute = (int(x) for x in time_str.split(":"))
+    except (ValueError, AttributeError):
+        hour, minute = 0, 0
+
+    tz_str = config.get("timezone", "UTC")
+    try:
+        tz = pytz.timezone(tz_str)
+    except Exception:
+        tz = pytz.utc
+
+    frequency = config.get("frequency", "daily")
+    if frequency == "weekly":
+        day = config.get("day_of_week", 0)  # 0=Mon ... 6=Sun (cron convention)
+        trigger = CronTrigger(day_of_week=day, hour=hour, minute=minute, timezone=tz)
+    else:
+        trigger = CronTrigger(hour=hour, minute=minute, timezone=tz)
+
+    if not MASTER_ENCRYPTION_KEY:
+        logger.warning("Backup scheduled but MASTER_ENCRYPTION_KEY is missing — runs will fail until set.")
+
+    scheduler.add_job(scheduled_backup_job, trigger=trigger, id="auto_backup", replace_existing=True)
+    logger.info(f"Backup cron registered: {frequency} at {hour:02d}:{minute:02d} ({tz_str})")
 
 
 # Lifecycle
@@ -225,8 +350,23 @@ async def lifespan(app: FastAPI):
 
     logger.info("MongoDB indexes & counters initialised.")
 
+    # Start the cron scheduler and apply any saved backup schedule.
+    try:
+        scheduler.start()
+        logger.info("Background scheduler started.")
+        sched_config = await db.settings.find_one({"type": "backup_schedule"}, {"_id": 0})
+        if sched_config and sched_config.get("enabled"):
+            apply_backup_schedule(sched_config)
+    except Exception as e:
+        logger.warning(f"Could not start scheduler / load backup schedule: {e}")
+
     yield
     logger.info("Server shutting down...")
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+    except Exception:
+        pass
     client.close()
 
 app = FastAPI(title="EZ Accounts by Kyrex API", version="2.0.0", lifespan=lifespan)
@@ -349,6 +489,14 @@ class ModulesSettings(BaseModel):
     enable_debit_notes: bool = True
     enable_advanced_ims: bool = False
     enable_production: bool = False
+
+class BackupScheduleSettings(BaseModel):
+    """User-configurable cron schedule for the automatic S3 backup job."""
+    enabled: bool = False
+    frequency: str = "daily"          # "daily" | "weekly"
+    time: str = "00:00"               # HH:MM 24h
+    timezone: str = "UTC"             # IANA tz name
+    day_of_week: Optional[int] = 0    # 0=Mon ... 6=Sun (only for weekly)
 
 # BOM and Production Order schemas
 class BOMComponent(BaseModel):
@@ -4757,6 +4905,34 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
         return {"registration_enabled": False}
     return settings
 
+# ============== BACKUP SCHEDULE (cron) ==============
+
+@api_router.get("/settings/backup/schedule")
+async def get_backup_schedule(current_user: dict = Depends(get_current_user)):
+    """Return the saved backup-schedule config (disabled if none stored)."""
+    doc = await db.settings.find_one({"type": "backup_schedule"}, {"_id": 0, "type": 0, "updated_at": 0})
+    if not doc:
+        return BackupScheduleSettings().model_dump()
+    return doc
+
+
+@api_router.put("/settings/backup/schedule")
+async def update_backup_schedule(
+    schedule: BackupScheduleSettings,
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist a new backup-schedule and (re-)register the cron job."""
+    config = schedule.model_dump()
+    config_doc = {
+        "type": "backup_schedule",
+        **config,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.settings.update_one({"type": "backup_schedule"}, {"$set": config_doc}, upsert=True)
+    # Re-register the cron job synchronously so the response reflects reality.
+    apply_backup_schedule(config)
+    return {"message": "Backup schedule updated", "schedule": config}
+
 @api_router.post("/settings/system")
 async def update_system_settings(settings: SystemSettings, current_user: dict = Depends(get_current_user)):
     """Update system settings"""
@@ -5400,6 +5576,17 @@ async def get_voice_stats(credentials: HTTPAuthorizationCredentials = Depends(se
     
     stats = ws_session_manager.get_session_stats()
     return stats
+
+
+@app.get("/api/health")
+@app.get("/health")
+async def health_check():
+    """Lightweight liveness check for Docker / load balancers / uptime monitors.
+    Does NOT touch the database — if the process is up enough to serve HTTP,
+    this returns 200. Use the existing /api/auth/config check elsewhere if you
+    need a DB-touching readiness probe.
+    """
+    return {"status": "ok"}
 
 
 app.include_router(api_router)

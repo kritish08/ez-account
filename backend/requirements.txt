@@ -23,6 +23,7 @@ et_xmlfile==2.0.0
 fastapi==0.110.1
 fastuuid==0.14.0
 fido2>=1.2.0,<3
+APScheduler>=3.10,<4
 filelock==3.20.3
 flake8==7.3.0
 fonttools==4.61.1
