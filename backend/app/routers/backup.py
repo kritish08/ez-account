@@ -89,7 +89,11 @@ async def create_backup(current_user: dict = Depends(get_current_user)):
     }
 
     for collection in collections:
-        docs = await db[collection].find({}, {"_id": 0}).to_list(10000)
+        # `to_list(None)` to match the scheduled job in services/backup.py.
+        # The previous cap of 10000 silently truncated any collection larger
+        # than that (most likely ledger / stock_movements for a busy tenant) —
+        # a backup that quietly drops data is worse than no backup.
+        docs = await db[collection].find({}, {"_id": 0}).to_list(None)
         backup_data["collections"][collection] = docs
 
     json_data = json.dumps(backup_data).encode()

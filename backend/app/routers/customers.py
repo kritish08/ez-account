@@ -215,7 +215,10 @@ async def get_customer_ledger(
             "debit": 0,
             "credit": 0,  # CN Creation DOES NOT reduce outstanding
             "cn_total": cn.get("total", 0),
-            "cn_original_total": cn.get("total", 0),
+            # Note: a `cn_original_total` field used to be emitted here that
+            # was just a duplicate of cn_total (the doc only stores the
+            # current decrementing total). It was unused by the frontend and
+            # actively misleading — dropped.
             "status": "active" if cn.get("total", 0) > 0 else "exhausted",
         })
 
