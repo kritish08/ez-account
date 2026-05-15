@@ -8,6 +8,7 @@ running-balance ledger; sort order is timestamp-then-type-priority so
 same-day rows are deterministic.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -132,16 +133,67 @@ async def get_customer_ledger(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    # Build the date-range filters once and reuse across the four
+    # collection-level queries.
+    def _date_filter(base: dict) -> dict:
+        q = dict(base)
+        if start_date:
+            q.setdefault("date", {})["$gte"] = start_date
+        if end_date:
+            q.setdefault("date", {})["$lte"] = end_date
+        return q
+
+    inv_query = _date_filter({"customer_id": customer_id})
+    pay_query = _date_filter({"customer_id": customer_id})
+    cn_query = _date_filter({"customer_id": customer_id})
+    cn_app_query = _date_filter({"account": f"customer:{customer_id}", "ref_type": "credit_note_application"})
+
+    # Applied-credit map is keyed by ref_id (= payment_id) and filtered by
+    # the customer-account narration — independent of the payments query
+    # itself, so it can be gathered in parallel.
+    async def _applied_credit_map() -> dict:
+        m: dict[str, float] = {}
+        async for entry in db.ledger.find(
+            {
+                "ref_type": "payment",
+                "account": f"customer:{customer_id}",
+                "narration": "Payment applied to invoices",
+            },
+            {"_id": 0, "ref_id": 1, "credit": 1},
+        ):
+            m[entry["ref_id"]] = entry.get("credit", 0)
+        return m
+
+    # All 8 reads below are independent — fire them in one parallel batch.
+    (
+        invoices,
+        payments,
+        credit_notes,
+        cn_applications,
+        opening_bals,
+        applied_credit_map,
+        cn_balance,
+        advance_payments,
+    ) = await asyncio.gather(
+        db.invoices.find(inv_query, {"_id": 0}).to_list(None),
+        db.payments.find(pay_query, {"_id": 0}).to_list(None),
+        db.credit_notes.find(cn_query, {"_id": 0}).to_list(None),
+        db.ledger.find(cn_app_query, {"_id": 0}).to_list(None),
+        db.ledger.find(
+            {"account": f"customer:{customer_id}", "ref_type": "setup"},
+            {"_id": 0},
+        ).to_list(10),
+        _applied_credit_map(),
+        get_customer_credit(customer_id),
+        db.advance_payments.find(
+            {"customer_id": customer_id, "remaining_amount": {"$gt": 0}},
+            {"_id": 0},
+        ).to_list(100),
+    )
+
     rows = []
 
     # ---- Invoices (Debit) ----
-    inv_query = {"customer_id": customer_id}
-    if start_date:
-        inv_query.setdefault("date", {})["$gte"] = start_date
-    if end_date:
-        inv_query.setdefault("date", {})["$lte"] = end_date
-
-    invoices = await db.invoices.find(inv_query, {"_id": 0}).to_list(None)
     for inv in invoices:
         rows.append({
             "timestamp": inv.get("created_at", inv.get("date", "") + "T00:00:00Z"),
@@ -156,32 +208,10 @@ async def get_customer_ledger(
         })
 
     # ---- Payments (Credit) ----
-    pay_query = {"customer_id": customer_id}
-    if start_date:
-        pay_query.setdefault("date", {})["$gte"] = start_date
-    if end_date:
-        pay_query.setdefault("date", {})["$lte"] = end_date
-
-    payments = await db.payments.find(pay_query, {"_id": 0}).to_list(None)
-    # Batch-fetch the "applied to invoices" credit for every payment in one
-    # query instead of N find_ones. The narration filter also makes this
-    # correct — a payment with an advance overflow has TWO customer-account
-    # ledger rows (applied + advance), and the previous find_one could pick
-    # the advance row, double-counting it later via adv_balance.
-    payment_ids = [p["id"] for p in payments if p.get("id")]
-    applied_credit_map: dict[str, float] = {}
-    if payment_ids:
-        async for entry in db.ledger.find(
-            {
-                "ref_type": "payment",
-                "ref_id": {"$in": payment_ids},
-                "account": f"customer:{customer_id}",
-                "narration": "Payment applied to invoices",
-            },
-            {"_id": 0, "ref_id": 1, "credit": 1},
-        ):
-            applied_credit_map[entry["ref_id"]] = entry.get("credit", 0)
-
+    # Narration-filtered ledger map (built in the parallel batch above)
+    # pins us to the applied-portion row even when a payment also has an
+    # advance overflow on the same customer:X account — see iteration 7
+    # for the original double-count fix.
     for pay in payments:
         applied_credit = applied_credit_map.get(pay.get("id"), 0)
         rows.append({
@@ -197,13 +227,6 @@ async def get_customer_ledger(
         })
 
     # ---- Credit Notes created (Credit, but doesn't reduce outstanding yet) ----
-    cn_query = {"customer_id": customer_id}
-    if start_date:
-        cn_query.setdefault("date", {})["$gte"] = start_date
-    if end_date:
-        cn_query.setdefault("date", {})["$lte"] = end_date
-
-    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0}).to_list(None)
     for cn in credit_notes:
         rows.append({
             "timestamp": cn.get("created_at", cn.get("date", "") + "T00:00:00Z"),
@@ -215,24 +238,10 @@ async def get_customer_ledger(
             "debit": 0,
             "credit": 0,  # CN Creation DOES NOT reduce outstanding
             "cn_total": cn.get("total", 0),
-            # Note: a `cn_original_total` field used to be emitted here that
-            # was just a duplicate of cn_total (the doc only stores the
-            # current decrementing total). It was unused by the frontend and
-            # actively misleading — dropped.
             "status": "active" if cn.get("total", 0) > 0 else "exhausted",
         })
 
     # ---- Credit Note Applications (Credit - reduces outstanding) ----
-    cn_app_query = {
-        "account": f"customer:{customer_id}",
-        "ref_type": "credit_note_application"
-    }
-    if start_date:
-        cn_app_query.setdefault("date", {})["$gte"] = start_date
-    if end_date:
-        cn_app_query.setdefault("date", {})["$lte"] = end_date
-
-    cn_applications = await db.ledger.find(cn_app_query, {"_id": 0}).to_list(None)
     for cn_app in cn_applications:
         # ledger entries lack created_at; pin them to end-of-day so they sort
         # after the invoice they apply to.
@@ -249,11 +258,6 @@ async def get_customer_ledger(
         })
 
     # ---- Opening Balance ----
-    opening_bal_query = {
-        "account": f"customer:{customer_id}",
-        "ref_type": "setup"
-    }
-    opening_bals = await db.ledger.find(opening_bal_query, {"_id": 0}).to_list(10)
     for ob in opening_bals:
         rows.append({
             "timestamp": ob.get("date", "") + "T00:00:00Z",
@@ -293,17 +297,6 @@ async def get_customer_ledger(
         total_invoiced += ob.get("debit", 0)
         total_paid += ob.get("credit", 0)
 
-    cn_balance = await get_customer_credit(customer_id)
-
-    # Compute advance balance
-    # Project away _id — without it, BSON ObjectId leaks into the response
-    # and FastAPI's JSON serializer 500s. The bug only surfaced when a
-    # customer actually had a remaining advance.
-    adv_cursor = db.advance_payments.find(
-        {"customer_id": customer_id, "remaining_amount": {"$gt": 0}},
-        {"_id": 0},
-    )
-    advance_payments = await adv_cursor.to_list(100)
     adv_balance = sum([a["remaining_amount"] for a in advance_payments])
 
     return {
