@@ -6,6 +6,7 @@ collection and BOMs are referenced by their own stable `id` from production
 orders. Save is upsert + `$setOnInsert` so the id survives edits.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.deps import get_current_user
 from app.schemas.bom import BOMCreate
-from app.services.stock import get_product_stock
+from app.services.stock import get_all_product_stock
 
 router = APIRouter(prefix="/api", tags=["bom"])
 
@@ -25,18 +26,32 @@ async def get_bom(product_id: str, current_user: dict = Depends(get_current_user
     if not bom:
         return {"bom": None}
 
-    # Enrich components with product info and current stock
+    # Batch-fetch every component's product doc + the global stock map in
+    # parallel. Was previously 2 round-trips per component (find_one product
+    # + per-product stock aggregation).
+    component_ids = list({c["material_id"] for c in bom.get("components", []) if c.get("material_id")})
+
+    async def _component_map() -> dict[str, dict]:
+        if not component_ids:
+            return {}
+        return {p["id"]: p async for p in db.products.find(
+            {"id": {"$in": component_ids}},
+            {"_id": 0, "id": 1, "name": 1, "unit": 1},
+        )}
+
+    component_map, stock_map = await asyncio.gather(_component_map(), get_all_product_stock())
+
     enriched = []
     for comp in bom.get("components", []):
-        mat = await db.products.find_one({"id": comp["material_id"]}, {"_id": 0})
-        stock = await get_product_stock(comp["material_id"])
+        mat = component_map.get(comp["material_id"])
+        stock = stock_map.get(comp["material_id"], 0)
         required = comp["quantity"]
         enriched.append({
             **comp,
             "material_name": mat["name"] if mat else "Unknown",
             "material_unit": mat.get("unit", "pcs") if mat else "pcs",
             "current_stock": stock,
-            "sufficient": stock >= required
+            "sufficient": stock >= required,
         })
     bom["components"] = enriched
     return {"bom": bom}

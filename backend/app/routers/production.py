@@ -11,6 +11,7 @@ ledger entries when ref_type is one of `PRODUCTION_CONSUMED` or
 `PRODUCTION_OUTPUT`.
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from app.database import db
 from app.deps import get_current_user
 from app.schemas.production import ProductionOrderCreate
 from app.services.counters import _next_seq
-from app.services.stock import create_stock_movement, get_product_stock
+from app.services.stock import create_stock_movement, get_all_product_stock
 
 logger = logging.getLogger(__name__)
 
@@ -112,14 +113,32 @@ async def get_production_order(order_id: str, current_user: dict = Depends(get_c
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # Enrich
-    p = await db.products.find_one({"id": order["product_id"]}, {"_id": 0})
-    order["product_name"] = p["name"] if p else "Unknown"
-
+    # Collect every product id this view needs (the order's finished good
+    # + every ingredient material), then batch-fetch product names and the
+    # global stock map. Was previously 1 + 2*N (one find_one for the FG
+    # product + one find_one + one stock aggregation per ingredient) — now
+    # 2 queries regardless of ingredient count, fired in parallel.
+    needed_ids: set[str] = set()
+    if order.get("product_id"):
+        needed_ids.add(order["product_id"])
     for ing in order.get("ingredients", []):
-        mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
-        ing["material_name"] = mat["name"] if mat else "Unknown"
-        ing["current_stock"] = await get_product_stock(ing["material_id"])
+        if ing.get("material_id"):
+            needed_ids.add(ing["material_id"])
+
+    async def _name_map() -> dict[str, str]:
+        if not needed_ids:
+            return {}
+        return {p["id"]: p["name"] async for p in db.products.find(
+            {"id": {"$in": list(needed_ids)}},
+            {"_id": 0, "id": 1, "name": 1},
+        )}
+
+    name_map, stock_map = await asyncio.gather(_name_map(), get_all_product_stock())
+
+    order["product_name"] = name_map.get(order.get("product_id"), "Unknown")
+    for ing in order.get("ingredients", []):
+        ing["material_name"] = name_map.get(ing.get("material_id"), "Unknown")
+        ing["current_stock"] = stock_map.get(ing.get("material_id"), 0)
 
     return order
 
@@ -147,11 +166,22 @@ async def start_production_order(order_id: str, current_user: dict = Depends(get
 
     # Verify ALL ingredients sufficient before consuming any. If anything is
     # short, roll the status back so the user can retry after restocking.
+    # Batched: one stock-map aggregation + one batched product-name fetch
+    # instead of two find_ones per ingredient on the unhappy path.
+    ingredient_ids = list({ing["material_id"] for ing in order.get("ingredients", []) if ing.get("material_id")})
+    stock_map = await get_all_product_stock() if ingredient_ids else {}
+    name_map: dict[str, str] = {}
+    if ingredient_ids:
+        async for p in db.products.find(
+            {"id": {"$in": ingredient_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            name_map[p["id"]] = p["name"]
+
     for ing in order.get("ingredients", []):
-        available = await get_product_stock(ing["material_id"])
+        available = stock_map.get(ing["material_id"], 0)
         if available < ing["quantity_required"]:
-            mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
-            name = mat["name"] if mat else ing["material_id"]
+            name = name_map.get(ing["material_id"], ing["material_id"])
             await db.production_orders.update_one(
                 {"id": order_id},
                 {"$set": {"status": "PLANNED"}, "$unset": {"started_at": ""}}
