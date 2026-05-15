@@ -7,7 +7,7 @@ Maintains session state, draft data, and conversation history.
 
 import uuid
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -33,8 +33,8 @@ class VoiceSession:
         self.state = SessionState.IDLE
         self.current_draft: Optional[Dict[str, Any]] = None
         self.conversation_history: List[Dict[str, str]] = []
-        self.created_at = datetime.utcnow()
-        self.last_activity = datetime.utcnow()
+        self.created_at = datetime.now(timezone.utc)
+        self.last_activity = datetime.now(timezone.utc)
     
     def get_context(self) -> Dict[str, Any]:
         """
@@ -89,7 +89,7 @@ class VoiceSession:
         # can drop the oldest items freely without losing instructions.
         if len(self.conversation_history) > self.MAX_HISTORY_TURNS:
             self.conversation_history = self.conversation_history[-self.MAX_HISTORY_TURNS:]
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
     
     def reset_draft(self):
         """Clear current draft and return to idle state."""
@@ -98,5 +98,5 @@ class VoiceSession:
     
     def is_expired(self, timeout_minutes: int = 30) -> bool:
         """Check if session has been inactive for too long."""
-        elapsed = (datetime.utcnow() - self.last_activity).total_seconds() / 60
+        elapsed = (datetime.now(timezone.utc) - self.last_activity).total_seconds() / 60
         return elapsed > timeout_minutes
