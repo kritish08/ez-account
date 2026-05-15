@@ -14,6 +14,7 @@ Delete reverses both the doc's own ledger / stock effects AND any
 been applied to an invoice.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -105,9 +106,11 @@ async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_us
     if not existing:
         raise HTTPException(status_code=404, detail="Credit Note not found")
 
-    # Reverse existing effects
-    await delete_stock_movements("credit_note", cn_id)
-    await delete_ledger_entries("credit_note", cn_id)
+    # Reverse existing effects — independent collections.
+    await asyncio.gather(
+        delete_stock_movements("credit_note", cn_id),
+        delete_ledger_entries("credit_note", cn_id),
+    )
 
     cn_date = cn_update.date or existing["date"]
 
@@ -206,11 +209,14 @@ async def delete_credit_note(cn_id: str, current_user: dict = Depends(get_curren
                     {"$set": {"paid_amount": new_paid, "status": new_status, "credit_note_applied": 0}}
                 )
 
-    await delete_stock_movements("credit_note", cn_id)
-    await delete_ledger_entries("credit_note", cn_id)
-    # Reverse customer-ledger relief entries posted when this CN was applied
-    # to any invoice (see apply_credit_note_to_invoice).
-    await delete_ledger_entries("credit_note_application", cn_id)
+    # Independent collections / ref_types — gather to overlap round-trips.
+    # The credit_note_application ledger relief was posted when the CN was
+    # applied to any invoice (see apply_credit_note_to_invoice).
+    await asyncio.gather(
+        delete_stock_movements("credit_note", cn_id),
+        delete_ledger_entries("credit_note", cn_id),
+        delete_ledger_entries("credit_note_application", cn_id),
+    )
     await db.credit_notes.delete_one({"id": cn_id})
 
     return {"message": "Credit Note deleted and effects reversed"}

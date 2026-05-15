@@ -11,6 +11,7 @@ the offsetting purchases-returns entry on each edit and overstating
 purchase expenses.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -119,9 +120,11 @@ async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user
         if item.product_id not in product_name_map:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
 
-    # Reverse existing effects
-    await delete_stock_movements("debit_note", dn_id)
-    await delete_ledger_entries("debit_note", dn_id)
+    # Reverse existing effects — independent collections.
+    await asyncio.gather(
+        delete_stock_movements("debit_note", dn_id),
+        delete_ledger_entries("debit_note", dn_id),
+    )
 
     dn_date = dn_update.date or existing["date"]
 
@@ -195,8 +198,10 @@ async def delete_debit_note(dn_id: str, current_user: dict = Depends(get_current
     if not existing:
         raise HTTPException(status_code=404, detail="Debit Note not found")
 
-    await delete_stock_movements("debit_note", dn_id)
-    await delete_ledger_entries("debit_note", dn_id)
+    await asyncio.gather(
+        delete_stock_movements("debit_note", dn_id),
+        delete_ledger_entries("debit_note", dn_id),
+    )
     await db.debit_notes.delete_one({"id": dn_id})
 
     return {"message": "Debit Note deleted and effects reversed"}

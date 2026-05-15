@@ -10,6 +10,7 @@ Edit refuses if a supplier payment / debit-note has already been applied
 (FIN-P0-3) — caller must reverse those first so cash and AP stay in sync.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -182,9 +183,11 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
         if item.product_id and item.product_id not in product_name_map:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
 
-    # Reverse previous entries
-    await delete_stock_movements("purchase", purchase_id)
-    await delete_ledger_entries("purchase", purchase_id)
+    # Reverse previous entries — independent collections, gather them.
+    await asyncio.gather(
+        delete_stock_movements("purchase", purchase_id),
+        delete_ledger_entries("purchase", purchase_id),
+    )
 
     items = []
     total = 0
@@ -251,8 +254,10 @@ async def delete_purchase(purchase_id: str, current_user: dict = Depends(get_cur
     if not existing:
         raise HTTPException(status_code=404, detail="Purchase not found")
 
-    await delete_stock_movements("purchase", purchase_id)
-    await delete_ledger_entries("purchase", purchase_id)
+    await asyncio.gather(
+        delete_stock_movements("purchase", purchase_id),
+        delete_ledger_entries("purchase", purchase_id),
+    )
 
     await db.purchases.delete_one({"id": purchase_id})
     return {"message": "Purchase deleted and effects reversed"}
