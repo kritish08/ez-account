@@ -84,8 +84,13 @@ const Settings = () => {
   const [savingCompany, setSavingCompany] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(null);
   const [updatingSystem, setUpdatingSystem] = useState(false);
+  // Default OFF — must match VoiceAssistant.js. The previous `!== 'false'`
+  // returned true when localStorage was null (fresh user), so the Settings
+  // toggle showed ON while the VoiceAssistant component (which uses
+  // `=== 'true'`) rendered nothing — the toggle and the actual feature
+  // disagreed.
   const [voiceAssistantEnabled, setVoiceAssistantEnabled] = useState(
-    () => localStorage.getItem('voiceAssistantEnabled') !== 'false'
+    () => localStorage.getItem('voiceAssistantEnabled') === 'true'
   );
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetPassword, setResetPassword] = useState("");

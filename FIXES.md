@@ -1095,6 +1095,33 @@ Added `Field(..., ge=0)` to `selling_price`, `cost_price`, `stock_quantity`, `op
 
 ---
 
+## VOICE-TOGGLE-SYNC — Settings toggle showed ON but voice button was hidden  🔬
+
+**Severity:** P1 (UI inconsistency — feature pretended to be enabled)
+**Files:** `frontend/src/pages/Settings.js:87` · `frontend/src/components/VoiceAssistant.js:420`
+
+### Root cause
+When VOICE-FACADE flipped the default to OFF, only `VoiceAssistant.js` was updated:
+
+| File | Read | Value when `localStorage` is unset |
+|---|---|---|
+| `VoiceAssistant.js` | `getItem('voiceAssistantEnabled') === 'true'` | **false** → component renders nothing |
+| `Settings.js`       | `getItem('voiceAssistantEnabled') !== 'false'` | **true** → toggle shows ON |
+
+Result: a fresh user opened Settings, saw the Voice Assistant toggle ON, but no mic button appeared anywhere in the app — the two reads disagreed on what "absent" means.
+
+### Fix
+Aligned `Settings.js` to use the same `=== 'true'` semantics as `VoiceAssistant.js`. Both now default OFF when the key is absent. Toggling ON in Settings still works via the existing `voiceAssistantToggle` custom event.
+
+### Verify
+1. Clear `localStorage.voiceAssistantEnabled` and reload `/settings` → toggle is OFF.
+2. Click the toggle → mic button appears in the bottom-right immediately.
+3. Reload the page → toggle still ON, mic still visible.
+4. Click toggle OFF → mic button disappears immediately.
+5. Bundle verification (offline): the minified JS contains exactly two occurrences of `"true"===localStorage.getItem("voiceAssistantEnabled")` and zero of `"false"!==localStorage.getItem(...)`.
+
+---
+
 # Deferred — Known issues NOT fixed in this pass
 
 Listed so they aren't forgotten. Each will need its own scoped session.
@@ -1156,5 +1183,6 @@ When you sit down to verify, this is roughly the order that will catch regressio
 39. **Purchase batch tracking** → buy 50 kg of a `track_batches=true` raw material with `batch_id: "X"` → `GET /products/{id}/batches` returns it with `quantity: 50, source: "purchase"`. Buy 20 more with same batch_id → quantity becomes 70 (atomic `$inc`).
 40. **Product price validators** → `POST /api/products {selling_price:-1}` returns HTTP 422 (was silently accepting before).
 41. **BOM stable id** → save BOM v1, then save BOM v2 → `db.bill_of_materials.findOne({product_id}).id` is identical across both saves. Production order created after has `bom_id` matching the BOM's id (was always `null`).
+42. **Voice toggle ↔ button agree** → fresh user (clear `localStorage.voiceAssistantEnabled`) → Settings shows toggle OFF, mic button hidden. Toggle ON in Settings → mic button appears immediately. Reload → both still ON.
 
 
