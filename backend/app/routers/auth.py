@@ -12,10 +12,25 @@ credential-rebuild helper.
 
 import base64
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fido2 import cbor
+from fido2.webauthn import (
+    AttestationObject,
+    AuthenticationResponse,
+    AuthenticatorAssertionResponse,
+    AuthenticatorAttachment,
+    AuthenticatorAttestationResponse,
+    AuthenticatorData,
+    CollectedClientData,
+    PublicKeyCredentialDescriptor,
+    PublicKeyCredentialType,
+    PublicKeyCredentialUserEntity,
+    RegistrationResponse,
+    UserVerificationRequirement,
+)
 
 from app.database import db
 from app.deps import get_current_user
@@ -61,14 +76,6 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 @router.post("/auth/passkey/register/begin")
 async def register_passkey_begin(current_user: dict = Depends(get_current_user)):
     """Generate options for registering a new passkey for the current user."""
-    import secrets
-
-    from fido2.webauthn import (
-        AuthenticatorAttachment, PublicKeyCredentialDescriptor,
-        PublicKeyCredentialType, PublicKeyCredentialUserEntity,
-        UserVerificationRequirement,
-    )
-
     user_entity = PublicKeyCredentialUserEntity(
         # Random per registration — forces some platforms (e.g. iOS) to mint
         # a fresh credential instead of reusing an existing one.
@@ -131,10 +138,6 @@ async def register_passkey_complete(data: WebAuthnRegisterComplete, current_user
     state = cbor.decode(base64.b64decode(state_doc["state"]))
 
     try:
-        from fido2.webauthn import (
-            AttestationObject, AuthenticatorAttestationResponse,
-            CollectedClientData, RegistrationResponse,
-        )
         reg = data.registration_data
         resp = reg.get("response", {})
         registration_response = RegistrationResponse(
@@ -176,9 +179,6 @@ async def authenticate_passkey_begin(data: WebAuthnAuthenticateBegin):
     if not user or not user.get("passkeys"):
         raise HTTPException(status_code=404, detail="No passkeys registered for this account")
 
-    from fido2.webauthn import (
-        PublicKeyCredentialDescriptor, PublicKeyCredentialType, UserVerificationRequirement,
-    )
     allow_credentials = [
         PublicKeyCredentialDescriptor(
             type=PublicKeyCredentialType.PUBLIC_KEY,
@@ -232,10 +232,6 @@ async def authenticate_passkey_complete(data: WebAuthnAuthenticateComplete):
         raise HTTPException(status_code=400, detail="No valid credentials found for this user")
 
     try:
-        from fido2.webauthn import (
-            AuthenticationResponse, AuthenticatorAssertionResponse,
-            AuthenticatorData, CollectedClientData,
-        )
         cred = data.credential_data
         resp = cred.get("response", {})
 
