@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import db
 from app.deps import get_current_user
-from app.schemas.payment import PaymentCreate
+from app.schemas.payment import PaymentCreate, SupplierPaymentCreate
 from app.services.ledger import create_ledger_entry, delete_ledger_entries, get_account_balance
 from app.services.payments_apply import (
     apply_advance_payment_to_invoice, apply_credit_note_to_invoice,
@@ -268,21 +268,22 @@ async def delete_payment(payment_id: str, current_user: dict = Depends(get_curre
 
 
 @router.post("/supplier-payments")
-async def record_supplier_payment(supplier_id: str, amount: float, mode: str, date: Optional[str] = None, notes: Optional[str] = None, current_user: dict = Depends(get_current_user)):
-    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+async def record_supplier_payment(payment: SupplierPaymentCreate, current_user: dict = Depends(get_current_user)):
+    supplier = await db.suppliers.find_one({"id": payment.supplier_id}, {"_id": 0})
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
     payment_id = str(uuid.uuid4())
-    payment_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    payment_date = payment.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     payment_doc = {
         "id": payment_id,
-        "supplier_id": supplier_id,
+        "supplier_id": payment.supplier_id,
         "supplier_name": supplier["name"],
-        "amount": amount,
-        "mode": mode,
-        "notes": notes,
+        "amount": payment.amount,
+        "mode": payment.mode,
+        "notes": payment.notes,
+        "purchase_id": payment.purchase_id,
         "date": payment_date,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
@@ -291,9 +292,9 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
 
     # Credit cash/bank
     await create_ledger_entry(
-        account=mode,
+        account=payment.mode,
         debit=0,
-        credit=amount,
+        credit=payment.amount,
         narration=f"Payment to {supplier['name']}",
         ref_type="supplier_payment",
         ref_id=payment_id,
@@ -302,8 +303,8 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
 
     # Debit supplier account (reduce payable)
     await create_ledger_entry(
-        account=f"supplier:{supplier_id}",
-        debit=amount,
+        account=f"supplier:{payment.supplier_id}",
+        debit=payment.amount,
         credit=0,
         narration="Payment made",
         ref_type="supplier_payment",
@@ -313,23 +314,23 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
 
     # Check for overpayment (Debit Note). Balance is usually negative
     # (credit balance) because we owe them. Positive means we overpaid.
-    balance = await get_account_balance(f"supplier:{supplier_id}")
+    balance = await get_account_balance(f"supplier:{payment.supplier_id}")
 
     debit_note_id = None
     if balance > 0:
         # Reconstruct the pre-payment balance: this payment posted a debit of
-        # `amount` to the supplier account, so subtract it from the current
-        # balance to get what the balance was before this payment.
-        old_balance = balance - amount
+        # `payment.amount` to the supplier account, so subtract it from the
+        # current balance to get what the balance was before this payment.
+        old_balance = balance - payment.amount
         # If old_balance was -100 (we owed 100), payment 150, balance = +50, excess = 50.
         # If old_balance was +10 (they owed us 10), payment 150, balance = +160, excess = 150.
 
         excess = 0
         if old_balance < 0:  # We owed money
-            if amount > abs(old_balance):
-                excess = amount - abs(old_balance)
+            if payment.amount > abs(old_balance):
+                excess = payment.amount - abs(old_balance)
         else:  # We didn't owe, or they owed us
-            excess = amount
+            excess = payment.amount
 
         if excess > 0:
             # Robust dn number generation
@@ -346,7 +347,7 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
             dn_doc = {
                 "id": dn_id,
                 "debit_note_number": dn_number,
-                "supplier_id": supplier_id,
+                "supplier_id": payment.supplier_id,
                 "supplier_name": supplier["name"],
                 "purchase_id": None,
                 "payment_id": payment_id,

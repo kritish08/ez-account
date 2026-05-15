@@ -135,8 +135,7 @@ export const createPayment = (data) => axios.post(`${API}/payments`, data);
 export const deletePayment = (id) => axios.delete(`${API}/payments/${id}`);
 
 // Supplier Payments
-export const createSupplierPayment = (data) =>
-  axios.post(`${API}/supplier-payments`, null, { params: data });
+export const createSupplierPayment = (data) => axios.post(`${API}/supplier-payments`, data);
 export const deleteSupplierPayment = (id) => axios.delete(`${API}/supplier-payments/${id}`);
 
 // Expenses
