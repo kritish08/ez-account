@@ -15,11 +15,10 @@ both allocate the same outstanding balance; on race, we re-read and retry.
 
 Supplier payments:
 - Cash leaves → credit cash/bank, debit supplier (reducing payable)
-- Overpayment can produce an auto-generated debit-note (visual marker)
-- Note: the overpayment path references a `current_balance` name that
-  isn't defined in this scope; preserved verbatim from pre-refactor code
-  to avoid scope creep. Triggered only when supplier ledger flips to a
-  positive (debit) balance after the payment, which is rare.
+- Overpayment auto-generates a debit-note as a visual marker for the
+  excess. The pre-payment balance is reconstructed from the post-payment
+  ledger balance (which already reflects this payment's debit entry)
+  by subtracting the payment amount.
 """
 
 import uuid
@@ -318,14 +317,12 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
 
     debit_note_id = None
     if balance > 0:
-        # Simple "Excess" logic based on Payable. Compute the pre-payment balance
-        # by subtracting this payment from the current one. NOTE: this branch
-        # references `current_balance` which isn't defined in this scope — a
-        # pre-existing bug preserved here. It only fires when supplier ledger
-        # flips into a debit balance after this payment (rare in normal use).
-        old_balance = current_balance - amount  # noqa: F821 (pre-existing bug)
-        # If old_balance was -100 (We owed 100). Payment 150. balance = +50. Excess = 50.
-        # If old_balance was +10 (They owed us 10). Payment 150. balance = +160. Excess = 150.
+        # Reconstruct the pre-payment balance: this payment posted a debit of
+        # `amount` to the supplier account, so subtract it from the current
+        # balance to get what the balance was before this payment.
+        old_balance = balance - amount
+        # If old_balance was -100 (we owed 100), payment 150, balance = +50, excess = 50.
+        # If old_balance was +10 (they owed us 10), payment 150, balance = +160, excess = 150.
 
         excess = 0
         if old_balance < 0:  # We owed money
