@@ -10,6 +10,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 from datetime import datetime
 import uuid
+
+from app.services.ledger import create_ledger_entry
+from app.services.stock import create_stock_movement
+
 from .voice_session import VoiceSession, SessionState
 
 
@@ -307,12 +311,45 @@ class FunctionExecutor:
         
         # Save to database
         await self.db.invoices.insert_one(invoice_doc)
-        
-        # TODO: Update ledger and stock movements (use existing logic from server.py)
-        
+
+        # Ledger + stock side-effects for non-draft invoices — same pattern
+        # as app/routers/invoices.py::create_invoice. Drafts intentionally
+        # skip these so they can be edited without churning ledger state.
+        if not as_draft:
+            invoice_date = invoice_doc["date"]
+            invoice_id = invoice_doc["id"]
+            await create_ledger_entry(
+                account=f"customer:{invoice_doc['customer_id']}",
+                debit=total,
+                credit=0,
+                narration=f"Invoice {invoice_number}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            )
+            await create_ledger_entry(
+                account="sales",
+                debit=0,
+                credit=total,
+                narration=f"Invoice {invoice_number}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            )
+            for item in invoice_doc["items"]:
+                if item.get("product_id"):
+                    await create_stock_movement(
+                        item["product_id"],
+                        0,
+                        item["quantity"],
+                        "invoice",
+                        invoice_id,
+                        invoice_date,
+                    )
+
         # Reset session
         self.session.reset_draft()
-        
+
         return {
             "success": True,
             "invoice_number": invoice_number,
@@ -589,13 +626,45 @@ class FunctionExecutor:
         
         # Save to database
         await self.db.purchases.insert_one(purchase_doc)
-        
-        # TODO: Update stock movements and product cost prices (use existing logic)
-        
-        # Reset session
+
+        # Ledger + stock side-effects — same pattern as
+        # app/routers/purchases.py::create_purchase.
+        purchase_id = purchase_doc["id"]
+        purchase_date = purchase_doc["date"]
+        payment_status = purchase_doc["payment_status"]
+        supplier_id = purchase_doc.get("supplier_id")
         total = self.session.current_draft["total"]
+        narration = f"Purchase {purchase_number}"
+
+        if payment_status == "cash":
+            await create_ledger_entry("cash", 0, total, narration, "purchase", purchase_id, purchase_date)
+        elif payment_status == "bank":
+            await create_ledger_entry("bank", 0, total, narration, "purchase", purchase_id, purchase_date)
+        elif payment_status == "unpaid" and supplier_id:
+            await create_ledger_entry(f"supplier:{supplier_id}", 0, total, narration, "purchase", purchase_id, purchase_date)
+
+        # Debit inventory_asset (accrual, mirrors REST flow).
+        await create_ledger_entry("inventory_asset", total, 0, narration, "purchase", purchase_id, purchase_date)
+
+        # Update product cost_price + post stock-in movement per line item.
+        for item in purchase_doc["items"]:
+            if item.get("product_id"):
+                await self.db.products.update_one(
+                    {"id": item["product_id"]},
+                    {"$set": {"cost_price": item["cost_price"]}},
+                )
+                await create_stock_movement(
+                    item["product_id"],
+                    item["quantity"],
+                    0,
+                    "purchase",
+                    purchase_id,
+                    purchase_date,
+                )
+
+        # Reset session
         self.session.reset_draft()
-        
+
         return {
             "success": True,
             "purchase_number": purchase_number,
