@@ -325,23 +325,22 @@ async def delete_customer(customer_id: str, current_user: dict = Depends(get_cur
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    # Check ALL dependencies, not just invoices + payments. Previously a
-    # customer with only credit-notes or advance-payments could be deleted
-    # while leaving orphaned references — mirroring the original supplier-
-    # delete gap fixed in iteration 2.
-    invoices = await db.invoices.count_documents({"customer_id": customer_id})
+    # Check ALL dependencies in parallel — on the happy path all four are
+    # zero so they overlap nicely. Previously a customer with only credit-
+    # notes or advance-payments could be deleted while leaving orphaned
+    # references.
+    invoices, payments, credit_notes, advance_payments = await asyncio.gather(
+        db.invoices.count_documents({"customer_id": customer_id}),
+        db.payments.count_documents({"customer_id": customer_id}),
+        db.credit_notes.count_documents({"customer_id": customer_id}),
+        db.advance_payments.count_documents({"customer_id": customer_id}),
+    )
     if invoices > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing invoices")
-
-    payments = await db.payments.count_documents({"customer_id": customer_id})
     if payments > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing payments")
-
-    credit_notes = await db.credit_notes.count_documents({"customer_id": customer_id})
     if credit_notes > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing credit notes")
-
-    advance_payments = await db.advance_payments.count_documents({"customer_id": customer_id})
     if advance_payments > 0:
         raise HTTPException(status_code=400, detail="Cannot delete customer with existing advance payments")
 

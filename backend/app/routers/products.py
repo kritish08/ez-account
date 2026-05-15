@@ -9,6 +9,7 @@ The `current_stock` and `is_low_stock` derived fields are computed via
 reflects movements in real time.
 """
 
+import asyncio
 import base64
 import uuid
 from datetime import datetime, timezone
@@ -119,23 +120,29 @@ async def delete_product(product_id: str, current_user: dict = Depends(get_curre
     # production order left orphan ingredient references and broke stock
     # deduction at /production-orders/{id}/start (looked up a now-deleted
     # product → silent failure).
-    invoice_usage = await db.invoices.find_one({"items.product_id": product_id})
+    # Four dependency checks across independent collections — gather them
+    # in parallel. On the happy path all four come back None and we proceed
+    # to the delete; on the unhappy path we still surface the same precedence
+    # of error messages as before.
+    invoice_usage, purchase_usage, bom_usage, po_usage = await asyncio.gather(
+        db.invoices.find_one({"items.product_id": product_id}, {"_id": 0, "id": 1}),
+        db.purchases.find_one({"items.product_id": product_id}, {"_id": 0, "id": 1}),
+        db.bill_of_materials.find_one({"components.material_id": product_id}, {"_id": 0, "id": 1}),
+        db.production_orders.find_one(
+            {"ingredients.material_id": product_id, "status": {"$in": ["PLANNED", "IN_PROGRESS", "QC"]}},
+            {"_id": 0, "id": 1, "order_number": 1},
+        ),
+    )
     if invoice_usage:
         raise HTTPException(status_code=400, detail="Cannot delete: product is used in invoices")
-    purchase_usage = await db.purchases.find_one({"items.product_id": product_id})
     if purchase_usage:
         raise HTTPException(status_code=400, detail="Cannot delete: product is used in purchases")
-    bom_usage = await db.bill_of_materials.find_one({"components.material_id": product_id})
     if bom_usage:
         raise HTTPException(
             status_code=400,
             detail="Cannot delete: product is a component of a Bill of Materials. "
                    "Remove it from the BOM first."
         )
-    po_usage = await db.production_orders.find_one({
-        "ingredients.material_id": product_id,
-        "status": {"$in": ["PLANNED", "IN_PROGRESS", "QC"]},
-    })
     if po_usage:
         raise HTTPException(
             status_code=400,
