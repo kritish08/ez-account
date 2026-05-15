@@ -85,16 +85,17 @@ async def create_credit_note(cn: CreditNoteCreate, current_user: dict = Depends(
     }
     await db.credit_notes.insert_one(cn_doc)
 
-    # Reduce customer outstanding (credit the customer account)
-    await create_ledger_entry(
-        f"customer:{cn.customer_id}", 0, total,
-        f"Credit Note {cn_number}", "credit_note", cn_id, cn_date
-    )
-
-    # Debit Sales Returns (reduce revenue)
-    await create_ledger_entry(
-        "sales_returns", total, 0,
-        f"Credit Note {cn_number}", "credit_note", cn_id, cn_date
+    # Customer-AR credit (reduces outstanding) + sales_returns debit
+    # (reduces revenue). Independent accounts — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            f"customer:{cn.customer_id}", 0, total,
+            f"Credit Note {cn_number}", "credit_note", cn_id, cn_date,
+        ),
+        create_ledger_entry(
+            "sales_returns", total, 0,
+            f"Credit Note {cn_number}", "credit_note", cn_id, cn_date,
+        ),
     )
 
     return {"message": "Credit Note created", "id": cn_id, "credit_note_number": cn_number}
@@ -152,14 +153,17 @@ async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_us
 
     await db.credit_notes.update_one({"id": cn_id}, {"$set": update_data})
 
-    # Re-create ledger entries (both sides — fixes missing sales_returns on update)
-    await create_ledger_entry(
-        f"customer:{existing['customer_id']}", 0, total,
-        f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date
-    )
-    await create_ledger_entry(
-        "sales_returns", total, 0,
-        f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date
+    # Re-create both ledger sides (fixes missing sales_returns on update).
+    # Independent accounts — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            f"customer:{existing['customer_id']}", 0, total,
+            f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date,
+        ),
+        create_ledger_entry(
+            "sales_returns", total, 0,
+            f"Credit Note {existing['credit_note_number']}", "credit_note", cn_id, cn_date,
+        ),
     )
 
     return {"message": "Credit Note updated"}

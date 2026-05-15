@@ -96,15 +96,18 @@ async def create_purchase(purchase: PurchaseCreate, current_user: dict = Depends
     await db.purchases.insert_one(purchase_doc)
 
     # Create ledger entries based on payment status
+    # Build the payment-side credit + inventory-asset debit pair, then fire
+    # them in parallel (independent accounts, same ref).
+    ledger_ops = []
     if purchase.payment_status == "cash":
-        await create_ledger_entry("cash", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry("cash", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date))
     elif purchase.payment_status == "bank":
-        await create_ledger_entry("bank", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry("bank", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date))
     elif purchase.payment_status == "unpaid" and purchase.supplier_id:
-        await create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
-
-    # Debit Inventory Asset Account (not Purchases expense directly, for accrual accuracy)
-    await create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date))
+    # Debit Inventory Asset (accrual). Always posted, regardless of payment status.
+    ledger_ops.append(create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number}", "purchase", purchase_id, purchase_date))
+    await asyncio.gather(*ledger_ops)
 
     # Check for Supplier Debit Balance (Advance/Debit Note) and update status/ledger awareness if needed
     debit_used = 0
@@ -232,15 +235,16 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
     await db.purchases.update_one({"id": purchase_id}, {"$set": update_data})
 
     purchase_number = existing["purchase_number"]
+    # Same parallel ledger-pair as create_purchase.
+    ledger_ops = []
     if purchase.payment_status == "cash":
-        await create_ledger_entry("cash", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry("cash", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date))
     elif purchase.payment_status == "bank":
-        await create_ledger_entry("bank", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry("bank", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date))
     elif purchase.payment_status == "unpaid" and purchase.supplier_id:
-        await create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
-
-    # Debit Inventory Asset Account (consistent with create_purchase)
-    await create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date)
+        ledger_ops.append(create_ledger_entry(f"supplier:{purchase.supplier_id}", 0, total, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date))
+    ledger_ops.append(create_ledger_entry("inventory_asset", total, 0, f"Purchase {purchase_number} (updated)", "purchase", purchase_id, purchase_date))
+    await asyncio.gather(*ledger_ops)
 
     if purchase.supplier_id and purchase.payment_status == "unpaid" and purchase.apply_debit:
         await apply_debit_to_purchase(purchase.supplier_id, purchase_id, total)

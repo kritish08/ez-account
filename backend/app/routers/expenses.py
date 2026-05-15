@@ -6,6 +6,7 @@ Edit reverses the previous ledger pair and re-posts a fresh one with the
 new amount/category/mode so the trial balance always reconciles.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -34,25 +35,27 @@ async def create_expense(expense: ExpenseCreate, current_user: dict = Depends(ge
 
     await db.expenses.insert_one(expense_doc)
 
-    await create_ledger_entry(
-        account=expense.mode,
-        debit=0,
-        credit=expense.amount,
-        narration=f"Expense: {expense.description}",
-        ref_type="expense",
-        ref_id=expense_id,
-        date=expense_date
-    )
-
-    # Debit Expense Account
-    await create_ledger_entry(
-        account=f"expense:{expense.category}",
-        debit=expense.amount,
-        credit=0,
-        narration=f"Expense: {expense.description}",
-        ref_type="expense",
-        ref_id=expense_id,
-        date=expense_date
+    # Cash/bank credit (money out) + expense-category debit — independent
+    # accounts, gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            account=expense.mode,
+            debit=0,
+            credit=expense.amount,
+            narration=f"Expense: {expense.description}",
+            ref_type="expense",
+            ref_id=expense_id,
+            date=expense_date,
+        ),
+        create_ledger_entry(
+            account=f"expense:{expense.category}",
+            debit=expense.amount,
+            credit=0,
+            narration=f"Expense: {expense.description}",
+            ref_type="expense",
+            ref_id=expense_id,
+            date=expense_date,
+        ),
     )
 
     return {"message": "Expense recorded", "id": expense_id}
@@ -86,27 +89,27 @@ async def update_expense(expense_id: str, expense: ExpenseUpdate, current_user: 
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.expenses.update_one({"id": expense_id}, {"$set": update_data})
 
-    # Re-create Ledger
+    # Re-create the cash-out + expense-category ledger pair in parallel.
     expense_date = expense.date or existing["date"]
-    await create_ledger_entry(
-        account=expense.mode,
-        debit=0,
-        credit=expense.amount,
-        narration=f"Expense: {expense.description} (updated)",
-        ref_type="expense",
-        ref_id=expense_id,
-        date=expense_date
-    )
-
-    # Debit Expense Account (new)
-    await create_ledger_entry(
-        account=f"expense:{expense.category}",
-        debit=expense.amount,
-        credit=0,
-        narration=f"Expense: {expense.description} (updated)",
-        ref_type="expense",
-        ref_id=expense_id,
-        date=expense_date
+    await asyncio.gather(
+        create_ledger_entry(
+            account=expense.mode,
+            debit=0,
+            credit=expense.amount,
+            narration=f"Expense: {expense.description} (updated)",
+            ref_type="expense",
+            ref_id=expense_id,
+            date=expense_date,
+        ),
+        create_ledger_entry(
+            account=f"expense:{expense.category}",
+            debit=expense.amount,
+            credit=0,
+            narration=f"Expense: {expense.description} (updated)",
+            ref_type="expense",
+            ref_id=expense_id,
+            date=expense_date,
+        ),
     )
 
     return {"message": "Expense updated"}

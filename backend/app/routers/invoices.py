@@ -119,25 +119,26 @@ async def create_invoice(invoice: InvoiceCreate, current_user: dict = Depends(ge
     amount_due = total
 
     if not invoice.is_draft:
-        await create_ledger_entry(
-            account=f"customer:{invoice.customer_id}",
-            debit=total,
-            credit=0,
-            narration=f"Invoice {invoice_number}",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date
-        )
-
-        # Credit Sales Account
-        await create_ledger_entry(
-            account="sales",
-            debit=0,
-            credit=total,
-            narration=f"Invoice {invoice_number}",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date
+        # Customer-AR debit + sales credit — independent accounts, gather.
+        await asyncio.gather(
+            create_ledger_entry(
+                account=f"customer:{invoice.customer_id}",
+                debit=total,
+                credit=0,
+                narration=f"Invoice {invoice_number}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
+            create_ledger_entry(
+                account="sales",
+                debit=0,
+                credit=total,
+                narration=f"Invoice {invoice_number}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
         )
 
         # Reduce stock for product items
@@ -259,24 +260,26 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
     amount_due = total
 
     if not is_draft:
-        await create_ledger_entry(
-            account=f"customer:{existing['customer_id']}",
-            debit=total,
-            credit=0,
-            narration=f"Invoice {existing['invoice_number']} (updated)",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date
-        )
-
-        await create_ledger_entry(
-            account="sales",
-            debit=0,
-            credit=total,
-            narration=f"Invoice {existing['invoice_number']} (updated)",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date
+        # Customer-AR debit + sales credit — independent accounts, gather.
+        await asyncio.gather(
+            create_ledger_entry(
+                account=f"customer:{existing['customer_id']}",
+                debit=total,
+                credit=0,
+                narration=f"Invoice {existing['invoice_number']} (updated)",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
+            create_ledger_entry(
+                account="sales",
+                debit=0,
+                credit=total,
+                narration=f"Invoice {existing['invoice_number']} (updated)",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
         )
 
         for item in items:
@@ -333,24 +336,26 @@ async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_u
 
     invoice_date = invoice["date"]
 
-    await create_ledger_entry(
-        account=f"customer:{invoice['customer_id']}",
-        debit=invoice["total"],
-        credit=0,
-        narration=f"Invoice {invoice['invoice_number']}",
-        ref_type="invoice",
-        ref_id=invoice_id,
-        date=invoice_date
-    )
-
-    await create_ledger_entry(
-        account="sales",
-        debit=0,
-        credit=invoice["total"],
-        narration=f"Invoice {invoice['invoice_number']}",
-        ref_type="invoice",
-        ref_id=invoice_id,
-        date=invoice_date
+    # Customer-AR debit + sales credit — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            account=f"customer:{invoice['customer_id']}",
+            debit=invoice["total"],
+            credit=0,
+            narration=f"Invoice {invoice['invoice_number']}",
+            ref_type="invoice",
+            ref_id=invoice_id,
+            date=invoice_date,
+        ),
+        create_ledger_entry(
+            account="sales",
+            debit=0,
+            credit=invoice["total"],
+            narration=f"Invoice {invoice['invoice_number']}",
+            ref_type="invoice",
+            ref_id=invoice_id,
+            date=invoice_date,
+        ),
     )
 
     # Batch product + stock lookups, then iterate. Was previously
