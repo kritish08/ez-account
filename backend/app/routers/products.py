@@ -86,12 +86,16 @@ async def list_products(
 
 @router.get("/products/{product_id}")
 async def get_product(product_id: str, current_user: dict = Depends(get_current_user)):
-    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    # Fetch product doc + its stock in parallel — 404 check after gather.
+    product, current_stock = await asyncio.gather(
+        db.products.find_one({"id": product_id}, {"_id": 0}),
+        get_product_stock(product_id),
+    )
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    product["current_stock"] = await get_product_stock(product_id)
-    product["is_low_stock"] = product["current_stock"] < product.get("low_stock_threshold", 10)
+    product["current_stock"] = current_stock
+    product["is_low_stock"] = current_stock < product.get("low_stock_threshold", 10)
     return product
 
 

@@ -34,16 +34,22 @@ async def create_customer(customer: CustomerCreate, current_user: dict = Depends
     }
     await db.customers.insert_one(customer_doc)
 
+    # Post the two opening-balance ledger entries in parallel — they target
+    # different accounts and have no inter-dependency, so they can overlap.
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if customer.opening_balance > 0:
         if customer.balance_type == "debit":
-            await create_ledger_entry(f"customer:{customer_id}", customer.opening_balance, 0, "Opening balance", "setup", customer_id, today)
-            # Credit Capital (Asset increases Equity)
-            await create_ledger_entry("capital", 0, customer.opening_balance, "Opening capital (customer)", "setup", customer_id, today)
+            await asyncio.gather(
+                create_ledger_entry(f"customer:{customer_id}", customer.opening_balance, 0, "Opening balance", "setup", customer_id, today),
+                # Credit Capital (Asset increases Equity)
+                create_ledger_entry("capital", 0, customer.opening_balance, "Opening capital (customer)", "setup", customer_id, today),
+            )
         else:
-            await create_ledger_entry(f"customer_credit:{customer_id}", 0, customer.opening_balance, "Opening credit balance", "setup", customer_id, today)
-            # Debit Capital (Liability reduces Equity)
-            await create_ledger_entry("capital", customer.opening_balance, 0, "Opening capital (customer)", "setup", customer_id, today)
+            await asyncio.gather(
+                create_ledger_entry(f"customer_credit:{customer_id}", 0, customer.opening_balance, "Opening credit balance", "setup", customer_id, today),
+                # Debit Capital (Liability reduces Equity)
+                create_ledger_entry("capital", customer.opening_balance, 0, "Opening capital (customer)", "setup", customer_id, today),
+            )
 
     return {"message": "Customer created", "id": customer_id}
 
@@ -91,12 +97,18 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
 
 @router.get("/customers/{customer_id}")
 async def get_customer(customer_id: str, current_user: dict = Depends(get_current_user)):
-    customer = await db.customers.find_one({"id": customer_id}, {"_id": 0})
+    # All three reads are keyed off the same id with no dependency on
+    # each other — fire as one parallel batch and 404 below.
+    customer, outstanding, credit = await asyncio.gather(
+        db.customers.find_one({"id": customer_id}, {"_id": 0}),
+        get_account_balance(f"customer:{customer_id}"),
+        get_customer_credit(customer_id),
+    )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    customer["outstanding"] = await get_account_balance(f"customer:{customer_id}")
-    customer["credit"] = await get_customer_credit(customer_id)
+    customer["outstanding"] = outstanding
+    customer["credit"] = credit
     return customer
 
 

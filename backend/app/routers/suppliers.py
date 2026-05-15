@@ -31,12 +31,16 @@ async def create_supplier(supplier: SupplierCreate, current_user: dict = Depends
     }
     await db.suppliers.insert_one(supplier_doc)
 
-    # Create opening balance ledger entry for supplier payable
+    # Post the two opening-balance ledger entries in parallel — they target
+    # different accounts (supplier:X liability + capital equity), no
+    # dependency between them.
     if supplier.opening_balance > 0:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        await create_ledger_entry(f"supplier:{supplier_id}", 0, supplier.opening_balance, "Opening balance payable", "setup", supplier_id, today)
-        # Debit Capital (Liability reduces Equity)
-        await create_ledger_entry("capital", supplier.opening_balance, 0, "Opening capital (supplier)", "setup", supplier_id, today)
+        await asyncio.gather(
+            create_ledger_entry(f"supplier:{supplier_id}", 0, supplier.opening_balance, "Opening balance payable", "setup", supplier_id, today),
+            # Debit Capital (Liability reduces Equity)
+            create_ledger_entry("capital", supplier.opening_balance, 0, "Opening capital (supplier)", "setup", supplier_id, today),
+        )
 
     return {"message": "Supplier created", "id": supplier_id}
 
@@ -73,11 +77,14 @@ async def list_suppliers(current_user: dict = Depends(get_current_user)):
 
 @router.get("/suppliers/{supplier_id}")
 async def get_supplier(supplier_id: str, current_user: dict = Depends(get_current_user)):
-    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    # Two reads, no dependency between them — gather, then 404.
+    supplier, balance = await asyncio.gather(
+        db.suppliers.find_one({"id": supplier_id}, {"_id": 0}),
+        get_account_balance(f"supplier:{supplier_id}"),
+    )
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
-    balance = await get_account_balance(f"supplier:{supplier_id}")
     supplier["payable"] = max(0, -balance)
     return supplier
 

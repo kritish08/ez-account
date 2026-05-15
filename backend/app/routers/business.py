@@ -6,6 +6,7 @@ Opening cash / opening bank balances post their counter-entry to the
 `capital` account at first save only.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -40,13 +41,18 @@ async def setup_business(business: BusinessSetup, current_user: dict = Depends(g
         await db.business.insert_one(business_doc)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Gather up to four opening-balance ledger entries — all independent
+        # (different account names, same ref). Built as a list to avoid
+        # passing empty gather()s when only one of cash/bank is set.
+        opening_entries = []
         if business.opening_cash > 0:
-            await create_ledger_entry("cash", business.opening_cash, 0, "Opening cash balance", "setup", business_id, today)
-            await create_ledger_entry("capital", 0, business.opening_cash, "Opening capital (cash)", "setup", business_id, today)
-
+            opening_entries.append(create_ledger_entry("cash", business.opening_cash, 0, "Opening cash balance", "setup", business_id, today))
+            opening_entries.append(create_ledger_entry("capital", 0, business.opening_cash, "Opening capital (cash)", "setup", business_id, today))
         if business.opening_bank > 0:
-            await create_ledger_entry("bank", business.opening_bank, 0, "Opening bank balance", "setup", business_id, today)
-            await create_ledger_entry("capital", 0, business.opening_bank, "Opening capital (bank)", "setup", business_id, today)
+            opening_entries.append(create_ledger_entry("bank", business.opening_bank, 0, "Opening bank balance", "setup", business_id, today))
+            opening_entries.append(create_ledger_entry("capital", 0, business.opening_bank, "Opening capital (bank)", "setup", business_id, today))
+        if opening_entries:
+            await asyncio.gather(*opening_entries)
 
     return {"message": "Business setup complete", "id": business_id}
 
