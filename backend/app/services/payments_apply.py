@@ -204,7 +204,14 @@ async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> 
 
 
 async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: str) -> float:
-    """Apply an Advance Payment to an invoice."""
+    """Apply an Advance Payment to an invoice — atomic, double-spend-safe.
+
+    Mirrors the apply_credit_note_to_invoice guard pattern (FIN-P0-1):
+    decrement the advance with a `>= apply_amount` filter so two concurrent
+    callers can't both spend the same remaining_amount, then increment the
+    invoice's paid_amount with a ceiling filter so the invoice can't be
+    over-paid. On either side losing the race the other side is rolled back.
+    """
     adv = await db.advance_payments.find_one({"id": advance_payment_id})
     if not adv or adv.get("remaining_amount", 0) <= 0:
         return 0
@@ -213,29 +220,54 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
     if not invoice:
         return 0
 
-    invoice_due = invoice["total"] - invoice.get("paid_amount", 0)
+    invoice_due = round(invoice["total"] - invoice.get("paid_amount", 0), 2)
     if invoice_due <= 0:
         return 0
 
     apply_amount = round(min(adv["remaining_amount"], invoice_due), 2)
-    new_adv_remaining = round(adv["remaining_amount"] - apply_amount, 2)
-    new_paid = round(invoice.get("paid_amount", 0) + apply_amount, 2)
-    new_status = "paid" if new_paid >= invoice["total"] else "partially_paid"
+    if apply_amount <= 0:
+        return 0
 
-    await db.advance_payments.update_one(
-        {"id": advance_payment_id},
-        {"$set": {"remaining_amount": new_adv_remaining}},
+    # Atomically decrement the advance with a >= filter — no negative
+    # remaining balances.
+    adv_result = await db.advance_payments.update_one(
+        {"id": advance_payment_id, "remaining_amount": {"$gte": apply_amount}},
+        {"$inc": {"remaining_amount": -apply_amount}},
     )
-    await db.invoices.update_one(
-        {"id": invoice_id},
-        {"$set": {
-            "paid_amount": new_paid,
-            "status": new_status,
-            "advance_payment_applied": invoice.get("advance_payment_applied", 0) + apply_amount,
+    if adv_result.modified_count == 0:
+        return 0  # raced — another caller drained the advance
+
+    # Atomically increment the invoice's paid_amount with a ceiling filter
+    # — no over-payment.
+    inv_result = await db.invoices.update_one(
+        {
+            "id": invoice_id,
+            "paid_amount": {"$lte": round(invoice["total"] - apply_amount, 2)},
+        },
+        {"$inc": {
+            "paid_amount": apply_amount,
+            "advance_payment_applied": apply_amount,
         }},
     )
+    if inv_result.modified_count == 0:
+        # Roll back the advance side so books stay balanced.
+        await db.advance_payments.update_one(
+            {"id": advance_payment_id},
+            {"$inc": {"remaining_amount": apply_amount}},
+        )
+        return 0
 
-    # Link the original payment to this invoice for rollback support.
+    # Reconcile invoice status from the now-current paid_amount.
+    updated_inv = await db.invoices.find_one(
+        {"id": invoice_id},
+        {"_id": 0, "total": 1, "paid_amount": 1},
+    )
+    if updated_inv:
+        new_status = "paid" if updated_inv["paid_amount"] >= updated_inv["total"] else "partially_paid"
+        await db.invoices.update_one({"id": invoice_id}, {"$set": {"status": new_status}})
+
+    # Link the original payment to this invoice for rollback support
+    # (delete_payment walks this collection to revert applications).
     await db.payment_allocations.insert_one({
         "id": str(uuid.uuid4()),
         "payment_id": adv["payment_id"],
