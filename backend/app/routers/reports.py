@@ -13,6 +13,7 @@ balance-sheet reports live with the maintenance/financial router in
 batch 7.
 """
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -29,22 +30,26 @@ router = APIRouter(prefix="/api", tags=["reports"])
 @router.get("/reports/outstanding")
 async def report_outstanding(current_user: dict = Depends(get_current_user)):
     """Outstanding receivables — single aggregation instead of N+1."""
-    customers = await db.customers.find({}, {"_id": 0}).to_list(None)
-    if not customers:
-        return {"report": [], "total": 0}
-
-    customer_accounts = [f"customer:{c['id']}" for c in customers]
+    # Aggregate by customer-account prefix so the ledger query is
+    # independent of the customers list (was previously $in customer_accounts
+    # which forced a sequential dependency). Orphaned-customer ledger rows,
+    # if any, just don't make it into the report — the customer-list loop
+    # filters them out.
     pipeline = [
-        {"$match": {"account": {"$in": customer_accounts}}},
+        {"$match": {"account": {"$regex": "^customer:"}}},
         {"$group": {
             "_id": "$account",
             "balance": {"$sum": {"$subtract": ["$debit", "$credit"]}},
         }},
     ]
-    balance_map = {}
-    async for row in db.ledger.aggregate(pipeline):
-        cid = row["_id"].split(":", 1)[1]
-        balance_map[cid] = row["balance"]
+    customers, balance_rows = await asyncio.gather(
+        db.customers.find({}, {"_id": 0}).to_list(None),
+        db.ledger.aggregate(pipeline).to_list(None),
+    )
+    if not customers:
+        return {"report": [], "total": 0}
+
+    balance_map = {row["_id"].split(":", 1)[1]: row["balance"] for row in balance_rows}
 
     report = []
     for customer in customers:
@@ -65,18 +70,21 @@ async def report_outstanding(current_user: dict = Depends(get_current_user)):
 @router.get("/reports/credit")
 async def report_credit(current_user: dict = Depends(get_current_user)):
     """Customer available-credit report — single aggregation instead of N+1."""
-    customers = await db.customers.find({}, {"_id": 0}).to_list(None)
+    # Group by customer_id without filtering on the customers list, so the
+    # CN aggregation can run in parallel with the customers fetch. The
+    # customer-iteration loop below filters out any orphaned rows.
+    credit_pipeline = [
+        {"$match": {"total": {"$gt": 0}}},
+        {"$group": {"_id": "$customer_id", "credit": {"$sum": "$total"}}},
+    ]
+    customers, credit_rows = await asyncio.gather(
+        db.customers.find({}, {"_id": 0}).to_list(None),
+        db.credit_notes.aggregate(credit_pipeline).to_list(None),
+    )
     if not customers:
         return {"report": [], "total": 0}
 
-    customer_ids = [c["id"] for c in customers]
-    credit_pipeline = [
-        {"$match": {"customer_id": {"$in": customer_ids}, "total": {"$gt": 0}}},
-        {"$group": {"_id": "$customer_id", "credit": {"$sum": "$total"}}},
-    ]
-    credit_map = {}
-    async for row in db.credit_notes.aggregate(credit_pipeline):
-        credit_map[row["_id"]] = row["credit"]
+    credit_map = {row["_id"]: row["credit"] for row in credit_rows}
 
     report = []
     for customer in customers:
@@ -102,18 +110,20 @@ async def report_sales(start_date: Optional[str] = None, end_date: Optional[str]
     if end_date:
         query.setdefault("date", {})["$lte"] = end_date
 
-    invoices = await db.invoices.find(query, {"_id": 0}).sort("date", -1).to_list(None)
-    total = sum(inv["total"] for inv in invoices)
-    collected = sum(inv.get("paid_amount", 0) for inv in invoices)
-    total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
-
-    # Deduct credit notes in the same period
-    cn_query = {}
+    cn_query: dict = {}
     if start_date:
         cn_query["date"] = {"$gte": start_date}
     if end_date:
         cn_query.setdefault("date", {})["$lte"] = end_date
-    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0, "total": 1}).to_list(None)
+
+    # Two independent reads — fire concurrently.
+    invoices, credit_notes = await asyncio.gather(
+        db.invoices.find(query, {"_id": 0}).sort("date", -1).to_list(None),
+        db.credit_notes.find(cn_query, {"_id": 0, "total": 1}).to_list(None),
+    )
+    total = sum(inv["total"] for inv in invoices)
+    collected = sum(inv.get("paid_amount", 0) for inv in invoices)
+    total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
     total_returns = sum(cn["total"] for cn in credit_notes)
 
     profit = (total - total_returns) - total_cost
@@ -151,11 +161,13 @@ async def report_expenses(start_date: Optional[str] = None, end_date: Optional[s
 
 @router.get("/reports/cash-bank")
 async def report_cash_bank(current_user: dict = Depends(get_current_user)):
-    cash_balance = await get_account_balance("cash")
-    bank_balance = await get_account_balance("bank")
-
-    cash_entries = await db.ledger.find({"account": "cash"}, {"_id": 0}).sort("date", -1).to_list(50)
-    bank_entries = await db.ledger.find({"account": "bank"}, {"_id": 0}).sort("date", -1).to_list(50)
+    # Four independent reads — gather in parallel.
+    cash_balance, bank_balance, cash_entries, bank_entries = await asyncio.gather(
+        get_account_balance("cash"),
+        get_account_balance("bank"),
+        db.ledger.find({"account": "cash"}, {"_id": 0}).sort("date", -1).to_list(50),
+        db.ledger.find({"account": "bank"}, {"_id": 0}).sort("date", -1).to_list(50),
+    )
 
     return {
         "cash_balance": cash_balance,
@@ -169,8 +181,10 @@ async def report_cash_bank(current_user: dict = Depends(get_current_user)):
 @router.get("/reports/inventory")
 async def report_inventory(current_user: dict = Depends(get_current_user)):
     """Product stock report."""
-    products = await db.products.find({}, {"_id": 0}).to_list(None)
-    stock_map = await get_all_product_stock()
+    products, stock_map = await asyncio.gather(
+        db.products.find({}, {"_id": 0}).to_list(None),
+        get_all_product_stock(),
+    )
     report = []
     total_value = 0
 
@@ -196,8 +210,10 @@ async def report_inventory(current_user: dict = Depends(get_current_user)):
 @router.get("/reports/inventory-by-type")
 async def report_inventory_by_type(current_user: dict = Depends(get_current_user)):
     """Inventory grouped by item type (Raw Material, WIP, Finished Good)."""
-    products = await db.products.find({}, {"_id": 0}).to_list(None)
-    stock_map = await get_all_product_stock()
+    products, stock_map = await asyncio.gather(
+        db.products.find({}, {"_id": 0}).to_list(None),
+        get_all_product_stock(),
+    )
     summary = {}
     details = []
     total_value = 0
@@ -232,8 +248,10 @@ async def report_inventory_by_type(current_user: dict = Depends(get_current_user
 @router.get("/reports/low-stock")
 async def report_low_stock(current_user: dict = Depends(get_current_user)):
     """Low stock report."""
-    products = await db.products.find({}, {"_id": 0}).to_list(None)
-    stock_map = await get_all_product_stock()
+    products, stock_map = await asyncio.gather(
+        db.products.find({}, {"_id": 0}).to_list(None),
+        get_all_product_stock(),
+    )
     report = []
 
     for product in products:
@@ -371,14 +389,15 @@ async def report_production_yield(current_user: dict = Depends(get_current_user)
 @router.get("/reports/supplier-payables")
 async def report_supplier_payables(current_user: dict = Depends(get_current_user)):
     """Supplier payables report."""
-    suppliers = await db.suppliers.find({}, {"_id": 0}).to_list(None)
-
-    # Batch-compute supplier balances via aggregation (avoid N+1 per-supplier ledger calls)
     balance_pipeline = [
         {"$match": {"account": {"$regex": "^supplier:"}}},
         {"$group": {"_id": "$account", "total_debit": {"$sum": "$debit"}, "total_credit": {"$sum": "$credit"}}}
     ]
-    balance_results = await db.ledger.aggregate(balance_pipeline).to_list(None)
+    # Two independent reads — suppliers list and ledger aggregation.
+    suppliers, balance_results = await asyncio.gather(
+        db.suppliers.find({}, {"_id": 0}).to_list(None),
+        db.ledger.aggregate(balance_pipeline).to_list(None),
+    )
     balance_map = {r["_id"]: r["total_debit"] - r["total_credit"] for r in balance_results}
 
     report = []
@@ -409,19 +428,20 @@ async def report_profit(start_date: Optional[str] = None, end_date: Optional[str
     if end_date:
         query.setdefault("date", {})["$lte"] = end_date
 
-    invoices = await db.invoices.find(query, {"_id": 0}).sort("date", -1).to_list(None)
-
-    total_sales = sum(inv["total"] for inv in invoices)
-    total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
-    gross_profit = total_sales - total_cost
-
-    exp_query = {}
+    exp_query: dict = {}
     if start_date:
         exp_query["date"] = {"$gte": start_date}
     if end_date:
         exp_query.setdefault("date", {})["$lte"] = end_date
 
-    expenses = await db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(None)
+    invoices, expenses = await asyncio.gather(
+        db.invoices.find(query, {"_id": 0}).sort("date", -1).to_list(None),
+        db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(None),
+    )
+
+    total_sales = sum(inv["total"] for inv in invoices)
+    total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
+    gross_profit = total_sales - total_cost
     total_expenses = sum(exp["amount"] for exp in expenses)
 
     net_profit = gross_profit - total_expenses
@@ -456,22 +476,22 @@ async def report_profit_loss(start_date: Optional[str] = None, end_date: Optiona
         cn_query["date"] = date_filter
         dn_query["date"] = date_filter
 
-    invoices = await db.invoices.find(inv_query, {"_id": 0}).sort("date", -1).to_list(None)
+    # Four independent reads — fire concurrently.
+    invoices, credit_notes, debit_notes, expenses = await asyncio.gather(
+        db.invoices.find(inv_query, {"_id": 0}).sort("date", -1).to_list(None),
+        db.credit_notes.find(cn_query, {"_id": 0}).sort("date", -1).to_list(None),
+        db.debit_notes.find(dn_query, {"_id": 0}).sort("date", -1).to_list(None),
+        db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(None),
+    )
     total_sales = sum(inv["total"] for inv in invoices)
     total_cost_of_goods = sum(inv.get("total_cost", 0) for inv in invoices)
-
-    # Returns: credit notes (reduce income) & debit notes (reduce purchases cost)
-    credit_notes = await db.credit_notes.find(cn_query, {"_id": 0}).sort("date", -1).to_list(None)
     total_credit_notes = sum(cn["total"] for cn in credit_notes)
-
-    debit_notes = await db.debit_notes.find(dn_query, {"_id": 0}).sort("date", -1).to_list(None)
     total_debit_notes = sum(dn["total"] for dn in debit_notes)
 
     net_sales = total_sales - total_credit_notes
     net_cost = total_cost_of_goods - total_debit_notes
     gross_profit = net_sales - net_cost
 
-    expenses = await db.expenses.find(exp_query, {"_id": 0}).sort("date", -1).to_list(None)
     expense_categories = {}
     for exp in expenses:
         cat = exp.get("category", "Other") or "Other"
