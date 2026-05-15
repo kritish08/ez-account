@@ -54,6 +54,7 @@ import { Plus, ShoppingCart, Loader2, Trash2, Banknote, Building2, Clock, MoreHo
 import { PageHeader } from "../components/PageHeader";
 import { UIFilters } from "../components/UIFilters";
 import BarcodeScanner from '../components/BarcodeScanner';
+import { SearchableProductSelect } from '../components/SearchableProductSelect';
 
 const Purchases = () => {
   const navigate = useNavigate();
@@ -589,14 +590,13 @@ const Purchases = () => {
                       <div key={index} className="grid grid-cols-12 gap-2 p-3 bg-slate-50 rounded-lg border border-slate-100 mb-2">
                         <div className="col-span-12 md:col-span-5 space-y-1">
                           <Label className="text-xs">Product</Label>
-                          <Select value={item.product_id} onValueChange={(value) => handleItemChange(index, "product_id", value)}>
-                            <SelectTrigger data-testid={`purchase-item-product-${index}`}>
-                              <SelectValue placeholder="Select product" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {products.map((p) => (<SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>))}
-                            </SelectContent>
-                          </Select>
+                          <SearchableProductSelect
+                            products={products}
+                            value={item.product_id}
+                            onValueChange={(value) => handleItemChange(index, "product_id", value)}
+                            placeholder="Search product"
+                            itemType="raw_material,wip"
+                          />
                         </div>
                         <div className="col-span-4 md:col-span-2 space-y-1">
                           <Label className="text-xs">Qty</Label>
