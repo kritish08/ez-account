@@ -1,7 +1,7 @@
 """Settings / modules / backup-schedule / S3 / reset schemas."""
 
-from typing import Optional
-from pydantic import BaseModel
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
 
 
 class ModulesSettings(BaseModel):
@@ -14,10 +14,16 @@ class ModulesSettings(BaseModel):
 class BackupScheduleSettings(BaseModel):
     """User-configurable cron schedule for the automatic S3 backup job."""
     enabled: bool = False
-    frequency: str = "daily"          # "daily" | "weekly"
-    time: str = "00:00"               # HH:MM 24h
-    timezone: str = "UTC"             # IANA tz name
-    day_of_week: Optional[int] = 0    # 0=Mon ... 6=Sun (only for weekly)
+    # Only these two values dispatch to a CronTrigger in apply_backup_schedule;
+    # the previous `str` accepted anything and silently fell through to a
+    # daily cron, ignoring the user's intent.
+    frequency: Literal["daily", "weekly"] = "daily"
+    # HH:MM 24h. apply_backup_schedule falls back to 00:00 on a parse error,
+    # but accepting malformed input silently was a footgun for testing.
+    time: str = Field(default="00:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    timezone: str = "UTC"             # IANA tz name; validated by apply_backup_schedule
+    # 0=Mon ... 6=Sun. Only consulted for frequency="weekly".
+    day_of_week: Optional[int] = Field(default=0, ge=0, le=6)
 
 
 class S3Settings(BaseModel):

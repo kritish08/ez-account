@@ -1,6 +1,6 @@
 """Purchase schemas."""
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -15,10 +15,16 @@ class PurchaseItem(BaseModel):
     serial_numbers: Optional[List[str]] = None
 
 
+# Only these three strings dispatch to a ledger entry in the router. Any
+# other value used to accept-and-silently-create a purchase doc with NO
+# ledger entry, corrupting the books on a typo.
+PurchasePaymentStatus = Literal["cash", "bank", "unpaid"]
+
+
 class PurchaseCreate(BaseModel):
     supplier_id: Optional[str] = None
     items: List[PurchaseItem]
-    payment_status: str = "unpaid"  # cash, bank, unpaid
+    payment_status: PurchasePaymentStatus = "unpaid"
     date: Optional[str] = None
     notes: Optional[str] = None
     attachment_url: Optional[str] = None
@@ -28,7 +34,7 @@ class PurchaseCreate(BaseModel):
 class PurchaseUpdate(BaseModel):
     supplier_id: Optional[str] = None
     items: List[PurchaseItem]
-    payment_status: str = "unpaid"
+    payment_status: PurchasePaymentStatus = "unpaid"
     date: Optional[str] = None
     notes: Optional[str] = None
     attachment_url: Optional[str] = None
