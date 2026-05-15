@@ -44,25 +44,25 @@ async def create_supplier(supplier: SupplierCreate, current_user: dict = Depends
 @router.get("/suppliers")
 async def list_suppliers(current_user: dict = Depends(get_current_user)):
     """List suppliers with payable balance. Single aggregation, no N+1."""
-    suppliers = await db.suppliers.find({}, {"_id": 0}).sort("name", 1).to_list(None)
-    if not suppliers:
-        return []
-
-    supplier_ids = [s["id"] for s in suppliers]
-    supplier_accounts = [f"supplier:{sid}" for sid in supplier_ids]
-
-    balance_map = {}
+    # Aggregate by account-prefix `^supplier:` so the ledger query has no
+    # dependency on the suppliers list (was previously $in supplier_accounts
+    # which forced sequential). Orphaned-supplier ledger rows, if any, are
+    # filtered out by the supplier-iteration loop below.
     pipeline = [
-        {"$match": {"account": {"$in": supplier_accounts}}},
+        {"$match": {"account": {"$regex": "^supplier:"}}},
         {"$group": {
             "_id": "$account",
             "balance": {"$sum": {"$subtract": ["$debit", "$credit"]}},
         }},
     ]
-    async for row in db.ledger.aggregate(pipeline):
-        sid = row["_id"].split(":", 1)[1]
-        balance_map[sid] = row["balance"]
+    suppliers, balance_rows = await asyncio.gather(
+        db.suppliers.find({}, {"_id": 0}).sort("name", 1).to_list(None),
+        db.ledger.aggregate(pipeline).to_list(None),
+    )
+    if not suppliers:
+        return []
 
+    balance_map = {row["_id"].split(":", 1)[1]: row["balance"] for row in balance_rows}
     for supplier in suppliers:
         # Payable = credits - debits (we owe them)
         balance = balance_map.get(supplier["id"], 0)
