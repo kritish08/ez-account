@@ -88,13 +88,16 @@ async def create_backup(current_user: dict = Depends(get_current_user)):
         "collections": {}
     }
 
-    for collection in collections:
-        # `to_list(None)` to match the scheduled job in services/backup.py.
-        # The previous cap of 10000 silently truncated any collection larger
-        # than that (most likely ledger / stock_movements for a busy tenant) —
-        # a backup that quietly drops data is worse than no backup.
-        docs = await db[collection].find({}, {"_id": 0}).to_list(None)
-        backup_data["collections"][collection] = docs
+    # `to_list(None)` to match the scheduled job in services/backup.py.
+    # The previous cap of 10000 silently truncated any collection larger
+    # than that — a backup that quietly drops data is worse than no backup.
+    # Read all 21 collections in parallel; the previous sequential loop
+    # paid one round-trip per collection.
+    collection_docs = await asyncio.gather(*[
+        db[c].find({}, {"_id": 0}).to_list(None) for c in collections
+    ])
+    for c, docs in zip(collections, collection_docs):
+        backup_data["collections"][c] = docs
 
     json_data = json.dumps(backup_data).encode()
     encrypted_package = encrypt_data(json_data, MASTER_ENCRYPTION_KEY)
@@ -195,14 +198,22 @@ async def restore_backup(filename: str, current_user: dict = Depends(get_current
         decrypted_data = decrypt_data(encrypted_package, MASTER_ENCRYPTION_KEY)
         backup_data = json.loads(decrypted_data.decode())
 
-        # Restore collections.
+        # Restore collections in parallel.
         # 'settings' is excluded to preserve current S3/system config.
-        # 'users' is excluded to prevent restoring stale passwords/accounts over live users.
+        # 'users' is excluded so a stale backup can't overwrite live logins.
         restore_exempt = {"settings", "users"}
-        for collection, docs in backup_data["collections"].items():
-            if collection not in restore_exempt and docs:
-                await db[collection].delete_many({})
-                await db[collection].insert_many(docs)
+
+        async def _restore_one(coll_name: str, docs: list) -> None:
+            # delete-then-insert MUST be sequential within a single
+            # collection, but across collections they're independent.
+            await db[coll_name].delete_many({})
+            await db[coll_name].insert_many(docs)
+
+        await asyncio.gather(*[
+            _restore_one(name, docs)
+            for name, docs in backup_data["collections"].items()
+            if name not in restore_exempt and docs
+        ])
 
         return {"message": "Backup restored successfully", "restored_at": backup_data.get("created_at")}
     except Exception as e:

@@ -84,19 +84,22 @@ async def get_supplier(supplier_id: str, current_user: dict = Depends(get_curren
 
 @router.get("/suppliers/{supplier_id}/ledger")
 async def get_supplier_ledger(supplier_id: str, current_user: dict = Depends(get_current_user)):
-    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    # Fetch supplier + ledger entries in parallel — both keyed off the same
+    # id, no dependency between them. 404 check runs after gather; the
+    # extra ledger query is cheap and only wasted on the rare 404 path.
+    supplier, entries = await asyncio.gather(
+        db.suppliers.find_one({"id": supplier_id}, {"_id": 0}),
+        db.ledger.find(
+            {"account": f"supplier:{supplier_id}"},
+            {"_id": 0},
+        ).sort("date", 1).to_list(None),
+    )
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
-    # Logic similar to customer ledger but for supplier (liability)
-    # Account: supplier:{id}
-    # Debit = Payment Made / Purchase Return (Reduces Liability)
-    # Credit = Purchase / Debit Note? (Increases Liability)
-
-    entries = await db.ledger.find(
-        {"account": f"supplier:{supplier_id}"},
-        {"_id": 0}
-    ).sort("date", 1).to_list(None)
+    # Supplier accounts are liabilities:
+    #   Credit = new purchase / debit-note → increases what we owe
+    #   Debit  = payment made / purchase return → decreases what we owe
 
     ledger = []
     running_balance = 0
