@@ -41,14 +41,22 @@ async def create_credit_note(cn: CreditNoteCreate, current_user: dict = Depends(
     cn_number = await get_next_credit_note_number()
     cn_date = cn.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Batch-fetch product names for all line items in one query (was one
+    # find_one per line).
+    line_product_ids = list({i.product_id for i in cn.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+
     items = []
     total = 0
     for item in cn.items:
-        product_name = item.description
+        product_name = product_name_map.get(item.product_id, item.description) if item.product_id else item.description
         if item.product_id:
-            product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-            if product:
-                product_name = product["name"]
             # Return stock (stock in)
             await create_stock_movement(item.product_id, item.quantity, 0, "credit_note", cn_id, cn_date)
 
@@ -103,14 +111,20 @@ async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_us
 
     cn_date = cn_update.date or existing["date"]
 
+    line_product_ids = list({i.product_id for i in cn_update.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+
     items = []
     total = 0
     for item in cn_update.items:
-        product_name = item.description
+        product_name = product_name_map.get(item.product_id, item.description) if item.product_id else item.description
         if item.product_id:
-            product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-            if product:
-                product_name = product["name"]
             # Return stock (stock in)
             await create_stock_movement(item.product_id, item.quantity, 0, "credit_note", cn_id, cn_date)
 

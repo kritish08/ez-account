@@ -38,17 +38,28 @@ async def create_debit_note(dn: DebitNoteCreate, current_user: dict = Depends(ge
     dn_number = await get_next_debit_note_number()
     dn_date = dn.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Batch-validate every line's product exists in one query. If any are
+    # missing, raise 404 BEFORE writing any stock movement so we don't leave
+    # the DN half-applied.
+    line_product_ids = list({i.product_id for i in dn.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+    for item in dn.items:
+        if item.product_id not in product_name_map:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+
     items = []
     total = 0
     for item in dn.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-
         amount = _money(item.quantity * item.cost_price)
         items.append({
             "product_id": item.product_id,
-            "product_name": product["name"],
+            "product_name": product_name_map[item.product_id],
             "quantity": item.quantity,
             "cost_price": item.cost_price,
             "amount": amount
@@ -93,6 +104,21 @@ async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user
     if not existing:
         raise HTTPException(status_code=404, detail="Debit Note not found")
 
+    # Batch-validate every line's product BEFORE reversing any state so a
+    # missing product doesn't leave the DN half-reversed (no stock movements,
+    # no ledger entries, but the doc still references the deleted product).
+    line_product_ids = list({i.product_id for i in dn_update.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+    for item in dn_update.items:
+        if item.product_id not in product_name_map:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+
     # Reverse existing effects
     await delete_stock_movements("debit_note", dn_id)
     await delete_ledger_entries("debit_note", dn_id)
@@ -102,14 +128,10 @@ async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user
     items = []
     total = 0
     for item in dn_update.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-
         amount = _money(item.quantity * item.cost_price)
         items.append({
             "product_id": item.product_id,
-            "product_name": product["name"],
+            "product_name": product_name_map[item.product_id],
             "quantity": item.quantity,
             "cost_price": item.cost_price,
             "amount": amount
