@@ -163,18 +163,27 @@ async def get_customer_ledger(
         pay_query.setdefault("date", {})["$lte"] = end_date
 
     payments = await db.payments.find(pay_query, {"_id": 0}).to_list(None)
+    # Batch-fetch the "applied to invoices" credit for every payment in one
+    # query instead of N find_ones. The narration filter also makes this
+    # correct — a payment with an advance overflow has TWO customer-account
+    # ledger rows (applied + advance), and the previous find_one could pick
+    # the advance row, double-counting it later via adv_balance.
+    payment_ids = [p["id"] for p in payments if p.get("id")]
+    applied_credit_map: dict[str, float] = {}
+    if payment_ids:
+        async for entry in db.ledger.find(
+            {
+                "ref_type": "payment",
+                "ref_id": {"$in": payment_ids},
+                "account": f"customer:{customer_id}",
+                "narration": "Payment applied to invoices",
+            },
+            {"_id": 0, "ref_id": 1, "credit": 1},
+        ):
+            applied_credit_map[entry["ref_id"]] = entry.get("credit", 0)
+
     for pay in payments:
-        # To avoid double counting, we only want the payment amount applied to invoices
-        # as a credit against the customer's outstanding balance.
-        # Read the actual ledger entries for this payment to get the applied amount.
-        pay_ledger = await db.ledger.find_one({
-            "ref_type": "payment",
-            "ref_id": pay.get("id"),
-            "account": f"customer:{customer_id}"
-        })
-
-        applied_credit = pay_ledger["credit"] if pay_ledger else 0
-
+        applied_credit = applied_credit_map.get(pay.get("id"), 0)
         rows.append({
             "timestamp": pay.get("created_at", pay.get("date", "") + "T00:00:00Z"),
             "date": pay.get("date", ""),
@@ -284,7 +293,13 @@ async def get_customer_ledger(
     cn_balance = await get_customer_credit(customer_id)
 
     # Compute advance balance
-    adv_cursor = db.advance_payments.find({"customer_id": customer_id, "remaining_amount": {"$gt": 0}})
+    # Project away _id — without it, BSON ObjectId leaks into the response
+    # and FastAPI's JSON serializer 500s. The bug only surfaced when a
+    # customer actually had a remaining advance.
+    adv_cursor = db.advance_payments.find(
+        {"customer_id": customer_id, "remaining_amount": {"$gt": 0}},
+        {"_id": 0},
+    )
     advance_payments = await adv_cursor.to_list(100)
     adv_balance = sum([a["remaining_amount"] for a in advance_payments])
 
