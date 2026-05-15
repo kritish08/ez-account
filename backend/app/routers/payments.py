@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.deps import get_current_user
 from app.schemas.payment import PaymentCreate, SupplierPaymentCreate
+from app.services.counters import get_next_debit_note_number
 from app.services.ledger import create_ledger_entry, delete_ledger_entries, get_account_balance
 from app.services.payments_apply import (
     apply_advance_payment_to_invoice, apply_credit_note_to_invoice,
@@ -333,15 +334,12 @@ async def record_supplier_payment(payment: SupplierPaymentCreate, current_user: 
             excess = payment.amount
 
         if excess > 0:
-            # Robust dn number generation
-            last_dn = await db.debit_notes.find_one({}, {"_id": 0, "debit_note_number": 1}, sort=[("debit_note_number", -1)])
-            dn_number = "DN-00001"
-            if last_dn:
-                try:
-                    last_num = int(last_dn["debit_note_number"].replace("DN-", ""))
-                    dn_number = f"DN-{str(last_num + 1).zfill(5)}"
-                except Exception:
-                    pass
+            # Use the canonical atomic counter. The previous inline
+            # find_one + increment was racy: two concurrent overpayments
+            # would compute the same DN-#####, and the partial-unique
+            # index on debit_note_number would 500 the slower request
+            # (its payment already recorded).
+            dn_number = await get_next_debit_note_number()
 
             dn_id = str(uuid.uuid4())
             dn_doc = {
