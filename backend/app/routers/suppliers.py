@@ -1,0 +1,168 @@
+"""Supplier CRUD + payable / ledger views.
+
+Supplier accounts are liabilities: `credit - debit` is what we owe them.
+The list endpoint is N+1-free (single ledger aggregation), and delete
+guards against orphan FKs by checking every collection that references
+the supplier, then sweeps the opening-balance setup entries so the
+trial balance stays clean.
+"""
+
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.database import db
+from app.deps import get_current_user
+from app.schemas.supplier import SupplierCreate, SupplierUpdate
+from app.services.ledger import create_ledger_entry, delete_ledger_entries, get_account_balance
+
+router = APIRouter(prefix="/api", tags=["suppliers"])
+
+
+@router.post("/suppliers")
+async def create_supplier(supplier: SupplierCreate, current_user: dict = Depends(get_current_user)):
+    supplier_id = str(uuid.uuid4())
+    supplier_doc = {
+        "id": supplier_id,
+        **supplier.model_dump(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.suppliers.insert_one(supplier_doc)
+
+    # Create opening balance ledger entry for supplier payable
+    if supplier.opening_balance > 0:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await create_ledger_entry(f"supplier:{supplier_id}", 0, supplier.opening_balance, "Opening balance payable", "setup", supplier_id, today)
+        # Debit Capital (Liability reduces Equity)
+        await create_ledger_entry("capital", supplier.opening_balance, 0, "Opening capital (supplier)", "setup", supplier_id, today)
+
+    return {"message": "Supplier created", "id": supplier_id}
+
+
+@router.get("/suppliers")
+async def list_suppliers(current_user: dict = Depends(get_current_user)):
+    """List suppliers with payable balance. Single aggregation, no N+1."""
+    suppliers = await db.suppliers.find({}, {"_id": 0}).sort("name", 1).to_list(None)
+    if not suppliers:
+        return []
+
+    supplier_ids = [s["id"] for s in suppliers]
+    supplier_accounts = [f"supplier:{sid}" for sid in supplier_ids]
+
+    balance_map = {}
+    pipeline = [
+        {"$match": {"account": {"$in": supplier_accounts}}},
+        {"$group": {
+            "_id": "$account",
+            "balance": {"$sum": {"$subtract": ["$debit", "$credit"]}},
+        }},
+    ]
+    async for row in db.ledger.aggregate(pipeline):
+        sid = row["_id"].split(":", 1)[1]
+        balance_map[sid] = row["balance"]
+
+    for supplier in suppliers:
+        # Payable = credits - debits (we owe them)
+        balance = balance_map.get(supplier["id"], 0)
+        supplier["payable"] = max(0, -balance)
+
+    return suppliers
+
+
+@router.get("/suppliers/{supplier_id}")
+async def get_supplier(supplier_id: str, current_user: dict = Depends(get_current_user)):
+    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    balance = await get_account_balance(f"supplier:{supplier_id}")
+    supplier["payable"] = max(0, -balance)
+    return supplier
+
+
+@router.get("/suppliers/{supplier_id}/ledger")
+async def get_supplier_ledger(supplier_id: str, current_user: dict = Depends(get_current_user)):
+    supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    # Logic similar to customer ledger but for supplier (liability)
+    # Account: supplier:{id}
+    # Debit = Payment Made / Purchase Return (Reduces Liability)
+    # Credit = Purchase / Debit Note? (Increases Liability)
+
+    entries = await db.ledger.find(
+        {"account": f"supplier:{supplier_id}"},
+        {"_id": 0}
+    ).sort("date", 1).to_list(None)
+
+    ledger = []
+    running_balance = 0
+
+    for entry in entries:
+        # Supplier is Liability: Credit increases, Debit decreases
+        # Balance = Credits - Debits
+        running_balance += entry["credit"] - entry["debit"]
+
+        if entry["credit"] > 0:
+            description = f"Purchase - {entry['narration']}"
+            amount = entry["credit"]
+            type_ = "purchase"
+        else:
+            description = f"Payment Made - {entry['narration']}"
+            amount = entry["debit"]
+            type_ = "payment"
+
+        ledger.append({
+            "date": entry["date"],
+            "description": description,
+            "amount": amount,
+            "type": type_,
+            "balance": running_balance
+        })
+
+    return {"supplier": supplier, "ledger": ledger, "current_balance": running_balance}
+
+
+@router.put("/suppliers/{supplier_id}")
+async def update_supplier(supplier_id: str, supplier: SupplierUpdate, current_user: dict = Depends(get_current_user)):
+    existing = await db.suppliers.find_one({"id": supplier_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    update_data = supplier.model_dump()
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    await db.suppliers.update_one({"id": supplier_id}, {"$set": update_data})
+    return {"message": "Supplier updated"}
+
+
+@router.delete("/suppliers/{supplier_id}")
+async def delete_supplier(supplier_id: str, current_user: dict = Depends(get_current_user)):
+    existing = await db.suppliers.find_one({"id": supplier_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+
+    # Check for ALL dependencies, not just purchases. Previously only the
+    # purchases collection was checked, so a supplier with debit notes or
+    # supplier payments would be deleted with stale references left behind,
+    # plus the opening-balance ledger entries.
+    purchases = await db.purchases.count_documents({"supplier_id": supplier_id})
+    if purchases > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete supplier with existing purchases")
+
+    debit_notes = await db.debit_notes.count_documents({"supplier_id": supplier_id})
+    if debit_notes > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete supplier with existing debit notes")
+
+    sup_payments = await db.supplier_payments.count_documents({"supplier_id": supplier_id})
+    if sup_payments > 0:
+        raise HTTPException(status_code=400, detail="Cannot delete supplier with existing payments")
+
+    # Clean up opening-balance ledger entries posted at supplier creation
+    # (otherwise they linger forever and pollute trial balance / reports).
+    await delete_ledger_entries("setup", supplier_id)
+
+    await db.suppliers.delete_one({"id": supplier_id})
+    return {"message": "Supplier deleted"}
