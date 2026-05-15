@@ -19,6 +19,7 @@ import RawMaterials from "./pages/RawMaterials";
 import FinishedGoods from "./pages/FinishedGoods";
 import ProductDetail from "./pages/ProductDetail";
 import Suppliers from "./pages/Suppliers";
+import SupplierDetail from "./pages/SupplierDetail";
 import Purchases from "./pages/Purchases";
 import CreditNotes from "./pages/CreditNotes";
 import CreditNoteDetail from "./pages/CreditNoteDetail";
@@ -70,6 +71,7 @@ function AppRoutes() {
           <Route path="finished-goods" element={<FinishedGoods />} />
           <Route path="products/:id" element={<ProductDetail />} />
           <Route path="suppliers" element={<Suppliers />} />
+          <Route path="suppliers/:id" element={<SupplierDetail />} />
           <Route path="purchases" element={<Purchases />} />
           <Route path="production" element={<ProductionOrders />} />
           <Route path="invoices" element={<Invoices />} />

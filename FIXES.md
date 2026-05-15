@@ -1188,6 +1188,63 @@ Open `http://localhost:8080`, log in with `test@best.com` / `password_123`, go t
 
 ---
 
+## OPS-BATCH-A — Health endpoint, auto-backup cron, SupplierDetail, env templates  🔬
+
+**Severity:** Feature ports from server snapshot (Batch A)
+**Files:** `backend/server.py`, `backend/requirements.txt`, `frontend/src/App.js`, `frontend/src/lib/api.js`, `frontend/src/pages/Settings.js`, `frontend/src/pages/SupplierDetail.js` (new), `.env.production.template` (new), `backend/env.production.example` (new)
+
+### Context
+Four items the deployed-server snapshot has but git didn't: a lightweight health check, an automatic encrypted-S3 backup on a cron schedule, the missing supplier detail page, and env templates. Ported on top of all audit fixes already on main.
+
+### 1. `/health` + `/api/health`
+Public, no-auth, doesn't touch the DB. Returns `{"status":"ok"}`. Mounted at both paths so reverse proxies (Traefik) and host-side monitors can hit either. Compose's existing `healthcheck:` block was already pointed at `/api/auth/config` (which does touch the DB and requires the route to be reachable) — that still works; the new endpoint is the cheaper option for liveness probes.
+
+### 2. Auto-backup cron (APScheduler)
+- `APScheduler>=3.10,<4` added to `requirements.txt`. `pytz` was already present.
+- Module-level `scheduler = AsyncIOScheduler(timezone="UTC")` started in lifespan; shut down cleanly on exit.
+- `scheduled_backup_job` mirrors the manual `/backup/create` pipeline (same envelope encryption, same collection set) and writes to `backup_logs` with `type: "scheduled"`. `boto3.put_object` runs inside `asyncio.to_thread` so a slow upload doesn't block the event loop (matches the BOTO3-THREAD fix).
+- `apply_backup_schedule(config)` removes any existing job and re-adds it with the new cron trigger. Bad timezone names fall back to UTC silently — the endpoint won't 500 on user typos.
+- Lifespan: at startup, reads `db.settings.find_one({"type":"backup_schedule"})` and re-registers the cron job if `enabled:true`. Survives backend restarts.
+- New `BackupScheduleSettings` pydantic model: `{enabled, frequency: "daily"|"weekly", time: "HH:MM", timezone, day_of_week: 0..6}`.
+- New endpoints:
+  - `GET /api/settings/backup/schedule` — returns saved config (or all-disabled defaults).
+  - `PUT /api/settings/backup/schedule` — persists + re-registers the cron job synchronously.
+- Frontend: new "Automatic Backup Schedule" card in Settings between S3 config and Danger Zone. Toggle, frequency, day-of-week (for weekly), time picker, free-form timezone field, Save button.
+
+### 3. SupplierDetail page
+- New `frontend/src/pages/SupplierDetail.js` (310 lines, copied verbatim from snapshot) — mirror of CustomerDetail. Date-filtered supplier ledger with summary tiles for outstanding payable, total purchases, total payments.
+- New route `/suppliers/:id` registered in `App.js`. The link from the suppliers list now lands on a real page instead of the catch-all 404.
+
+### 4. Env templates
+- `.env.production.template` (repo root) and `backend/env.production.example` — placeholder values for every required env var so a new deployer can copy-fill instead of grepping the source for `os.getenv`. Includes the new `WEBAUTHN_RP_ID` from the passkey port and the backup schedule context.
+
+### Verified (live smoke against the running stack)
+```
+✓ GET  /health                  → 200 {"status":"ok"}
+✓ GET  /api/health              → 200 {"status":"ok"}
+✓ GET  /settings/backup/schedule → defaults to enabled:false
+✓ PUT  daily 03:30 Asia/Kolkata  → scheduler log: "Backup cron registered: daily at 03:30 (Asia/Kolkata)"
+✓ Re-fetch persists the saved values
+✓ PUT  weekly Friday 22:00 UTC   → scheduler log: "weekly at 22:00 (UTC)"
+✓ PUT  enabled:false             → log: "Backup schedule disabled — no cron job registered"
+✓ PUT  bad timezone "Not/A/Zone" → 200 (graceful UTC fallback, no 500)
+✓ SupplierDetail page bundled (/suppliers/{id}/ledger path baked in)
+✓ Backup schedule UI in bundle (toggle, frequency, day-of-week, time, tz, save button)
+```
+
+### Browser-side test
+1. http://localhost:8080 → login → **Settings → Automatic Backup Schedule**
+2. Toggle ON, pick frequency / time / timezone, click "Save Schedule" → toast confirms.
+3. Restart the backend (`docker compose restart backend`) → backend log shows the schedule re-loaded.
+4. Suppliers list → click any supplier → **SupplierDetail page renders** (was the catch-all 404 before).
+
+### Notes
+- Cron job fires on the backend container's clock; pick a timezone that matches your operational expectations.
+- Bad timezones silently fall back to UTC rather than 500ing — the message goes to server logs as a warning.
+- `/health` is intentionally _stateless_; if you want a DB-touching readiness probe, use `/api/auth/config` (which is what compose.yaml's `healthcheck:` currently does).
+
+---
+
 # Deferred — Known issues NOT fixed in this pass
 
 Listed so they aren't forgotten. Each will need its own scoped session.
