@@ -17,6 +17,7 @@ PDF generation uses reportlab and is imported inline at endpoint time
 to keep this module light and to match the original layout.
 """
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -443,8 +444,11 @@ async def download_invoice_pdf(invoice_id: str, current_user: dict = Depends(get
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    customer = await db.customers.find_one({"id": invoice["customer_id"]}, {"_id": 0})
-    business = await db.business.find_one({}, {"_id": 0})
+    # customer + business are independent of each other — gather.
+    customer, business = await asyncio.gather(
+        db.customers.find_one({"id": invoice["customer_id"]}, {"_id": 0}),
+        db.business.find_one({}, {"_id": 0}),
+    )
 
     # reportlab + io are only needed here — import inline so the rest of the
     # router doesn't drag them in at import time.
@@ -588,19 +592,20 @@ async def delete_invoice(invoice_id: str, current_user: dict = Depends(get_curre
                    "Delete the payments / credit-note applications first."
         )
 
-    # If published (not draft), reverse all effects
+    # If published (not draft), reverse all effects. Each delete acts on a
+    # different collection (or different ref_type within ledger) so they're
+    # independent — gather to overlap the round-trips.
+    #
+    # We do NOT delete the parent payment — a payment may have been split
+    # across multiple invoices via FIFO. Deleting the payment would corrupt
+    # all other invoices it was applied to. Just clean up allocation rows.
     if invoice["status"] != "draft":
-        await delete_stock_movements("invoice", invoice_id)
-        # Reverse ledger entries (sale and COGS)
-        await delete_ledger_entries("invoice", invoice_id)
-        # Reverse credit applied entries
-        await delete_ledger_entries("invoice_credit", invoice_id)
-
-        # Reverse payment allocations for this invoice ONLY.
-        # We do NOT delete the parent payment — a payment may have been split
-        # across multiple invoices via FIFO. Deleting the payment would corrupt
-        # all other invoices it was applied to. Just clean up the allocation rows.
-        await db.payment_allocations.delete_many({"invoice_id": invoice_id})
+        await asyncio.gather(
+            delete_stock_movements("invoice", invoice_id),
+            delete_ledger_entries("invoice", invoice_id),
+            delete_ledger_entries("invoice_credit", invoice_id),
+            db.payment_allocations.delete_many({"invoice_id": invoice_id}),
+        )
 
     await db.invoices.delete_one({"id": invoice_id})
     return {"message": "Invoice deleted and all effects reversed"}
