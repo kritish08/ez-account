@@ -12,7 +12,7 @@ from .function_executor import FunctionExecutor
 from .voice_ai_handler import VoiceAIHandler
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class WebSocketSessionManager:
@@ -59,7 +59,7 @@ class WebSocketSessionManager:
         if user_id in self.active_sessions:
             session = self.active_sessions[user_id]
             # Update last activity
-            session.last_activity = datetime.utcnow()
+            session.last_activity = datetime.now(timezone.utc)
         else:
             session = VoiceSession(user_id)
             self.active_sessions[user_id] = session

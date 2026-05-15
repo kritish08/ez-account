@@ -8,7 +8,7 @@ All functions are based on actual database schema and API capabilities.
 from typing import Dict, Any, Optional, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ReturnDocument
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from app.services.ledger import create_ledger_entry
@@ -76,7 +76,7 @@ class FunctionExecutor:
             "items": [],
             "notes": None,
             "total": 0,
-            "date": datetime.now().strftime("%Y-%m-%d")
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")
         }
         self.session.state = SessionState.INVOICE_DRAFT
         
@@ -305,7 +305,7 @@ class FunctionExecutor:
             "notes": self.session.current_draft.get("notes"),
             "is_draft": as_draft,
             "status": "draft" if as_draft else "unpaid" if balance > 0 else "paid",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": self.session.user_id
         }
         
@@ -400,7 +400,7 @@ class FunctionExecutor:
             "payment_status": "unpaid",
             "notes": None,
             "total": 0,
-            "date": datetime.now().strftime("%Y-%m-%d")
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")
         }
         self.session.state = SessionState.PURCHASE_DRAFT
         
@@ -620,7 +620,7 @@ class FunctionExecutor:
             "payment_status": self.session.current_draft["payment_status"],
             "date": self.session.current_draft["date"],
             "notes": self.session.current_draft.get("notes"),
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": self.session.user_id
         }
         
