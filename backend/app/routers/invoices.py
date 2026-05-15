@@ -31,7 +31,10 @@ from app.services.counters import get_next_invoice_number
 from app.services.ledger import create_ledger_entry, delete_ledger_entries
 from app.services.money import _money
 from app.services.payments_apply import apply_credit_to_invoice
-from app.services.stock import create_stock_movement, delete_stock_movements, get_product_stock
+from app.services.stock import (
+    create_stock_movement, delete_stock_movements,
+    get_all_product_stock,
+)
 
 router = APIRouter(prefix="/api", tags=["invoices"])
 
@@ -51,6 +54,19 @@ async def create_invoice(invoice: InvoiceCreate, current_user: dict = Depends(ge
     total_cost = 0
     stock_warnings = []
 
+    # Batch-fetch every product referenced by a line item plus (for non-draft
+    # invoices) the full stock map in one shot — was previously two queries
+    # per line (find_one product + get_product_stock aggregation).
+    line_product_ids = list({i.product_id for i in invoice.items if i.product_id})
+    product_map: dict[str, dict] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1, "cost_price": 1},
+        ):
+            product_map[p["id"]] = p
+    stock_map = await get_all_product_stock() if not invoice.is_draft and line_product_ids else {}
+
     for item in invoice.items:
         amount = _money(item.quantity * item.rate)
         item_doc = {
@@ -62,14 +78,13 @@ async def create_invoice(invoice: InvoiceCreate, current_user: dict = Depends(ge
         }
 
         if item.product_id:
-            product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+            product = product_map.get(item.product_id)
             if product:
                 item_doc["cost_price"] = product.get("cost_price", 0)
                 total_cost += _money(item.quantity * product.get("cost_price", 0))
 
-                # Check stock only for non-draft
                 if not invoice.is_draft:
-                    current_stock = await get_product_stock(item.product_id)
+                    current_stock = stock_map.get(item.product_id, 0)
                     if current_stock < item.quantity:
                         stock_warnings.append({
                             "product": product["name"],
@@ -190,6 +205,17 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
     total_cost = 0
     stock_warnings = []
 
+    # Batch product + stock lookups (see create_invoice for context).
+    line_product_ids = list({i.product_id for i in invoice_update.items if i.product_id})
+    product_map: dict[str, dict] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1, "cost_price": 1},
+        ):
+            product_map[p["id"]] = p
+    stock_map = await get_all_product_stock() if not is_draft and line_product_ids else {}
+
     for item in invoice_update.items:
         amount = _money(item.quantity * item.rate)
         item_doc = {
@@ -201,13 +227,13 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
         }
 
         if item.product_id:
-            product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+            product = product_map.get(item.product_id)
             if product:
                 item_doc["cost_price"] = product.get("cost_price", 0)
                 total_cost += _money(item.quantity * product.get("cost_price", 0))
 
                 if not is_draft:
-                    current_stock = await get_product_stock(item.product_id)
+                    current_stock = stock_map.get(item.product_id, 0)
                     if current_stock < item.quantity:
                         stock_warnings.append({
                             "product": product["name"],
@@ -326,14 +352,25 @@ async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_u
         date=invoice_date
     )
 
+    # Batch product + stock lookups, then iterate. Was previously
+    # get_product_stock + find_one per item.
+    line_product_ids = list({i["product_id"] for i in invoice["items"] if i.get("product_id")})
+    name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            name_map[p["id"]] = p["name"]
+    stock_map = await get_all_product_stock() if line_product_ids else {}
+
     stock_warnings = []
     for item in invoice["items"]:
         if item.get("product_id"):
-            current_stock = await get_product_stock(item["product_id"])
+            current_stock = stock_map.get(item["product_id"], 0)
             if current_stock < item["quantity"]:
-                product = await db.products.find_one({"id": item["product_id"]}, {"_id": 0})
                 stock_warnings.append({
-                    "product": product["name"] if product else item["description"],
+                    "product": name_map.get(item["product_id"], item["description"]),
                     "current_stock": current_stock,
                     "required": item["quantity"]
                 })

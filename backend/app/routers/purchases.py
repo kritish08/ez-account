@@ -34,18 +34,29 @@ async def create_purchase(purchase: PurchaseCreate, current_user: dict = Depends
     purchase_number = await get_next_purchase_number()
     purchase_date = purchase.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Batch-fetch every line's product in one query (was one find_one per
+    # line). Validate all exist before any state changes so we don't leave
+    # half-applied stock movements behind if a later item is missing.
+    line_product_ids = list({i.product_id for i in purchase.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+    for item in purchase.items:
+        if item.product_id and item.product_id not in product_name_map:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+
     items = []
     total = 0
 
     for item in purchase.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-
         amount = _money(item.quantity * item.cost_price)
         items.append({
             "product_id": item.product_id,
-            "product_name": product["name"],
+            "product_name": product_name_map.get(item.product_id, ""),
             "quantity": item.quantity,
             "cost_price": item.cost_price,
             "amount": amount
@@ -157,6 +168,20 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
                    "Delete the supplier payment first."
         )
 
+    # Batch-validate every line's product BEFORE reversing any state so a
+    # missing product doesn't leave the purchase half-rolled-back.
+    line_product_ids = list({i.product_id for i in purchase.items if i.product_id})
+    product_name_map: dict[str, str] = {}
+    if line_product_ids:
+        async for p in db.products.find(
+            {"id": {"$in": line_product_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ):
+            product_name_map[p["id"]] = p["name"]
+    for item in purchase.items:
+        if item.product_id and item.product_id not in product_name_map:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+
     # Reverse previous entries
     await delete_stock_movements("purchase", purchase_id)
     await delete_ledger_entries("purchase", purchase_id)
@@ -166,14 +191,10 @@ async def update_purchase(purchase_id: str, purchase: PurchaseUpdate, current_us
     purchase_date = purchase.date or existing["date"]
 
     for item in purchase.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-
         amount = _money(item.quantity * item.cost_price)
         items.append({
             "product_id": item.product_id,
-            "product_name": product["name"],
+            "product_name": product_name_map.get(item.product_id, ""),
             "quantity": item.quantity,
             "cost_price": item.cost_price,
             "amount": amount
