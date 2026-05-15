@@ -58,9 +58,12 @@ async def scheduled_backup_job():
             "version": "2.0",
             "collections": {},
         }
-        for collection in collections:
-            docs = await db[collection].find({}, {"_id": 0}).to_list(None)
-            backup_data["collections"][collection] = docs
+        # Read all collections in parallel — N sequential round-trips → 1.
+        collection_docs = await asyncio.gather(*[
+            db[c].find({}, {"_id": 0}).to_list(None) for c in collections
+        ])
+        for c, docs in zip(collections, collection_docs):
+            backup_data["collections"][c] = docs
 
         json_data = json.dumps(backup_data).encode()
         encrypted_package = encrypt_data(json_data, MASTER_ENCRYPTION_KEY)
