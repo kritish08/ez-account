@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.deps import get_current_user
 from app.schemas.product import ProductCreate
-from app.services.stock import create_stock_movement, get_product_stock
+from app.services.stock import create_stock_movement, get_all_product_stock, get_product_stock
 
 router = APIRouter(prefix="/api", tags=["products"])
 
@@ -70,9 +70,14 @@ async def list_products(
     cursor = db.products.find(query, {"_id": 0}).sort("name", 1)
     # When the dropdown calls us, it doesn't need every product — cap to 50.
     products = await cursor.to_list(limit if limit and limit > 0 else None)
+    if not products:
+        return []
 
+    # Single stock-map aggregation instead of N per-product aggregations.
+    # /products is hit on every page load that has a product picker.
+    stock_map = await get_all_product_stock()
     for product in products:
-        product["current_stock"] = await get_product_stock(product["id"])
+        product["current_stock"] = stock_map.get(product["id"], 0)
         product["is_low_stock"] = product["current_stock"] < product.get("low_stock_threshold", 10)
 
     return products
