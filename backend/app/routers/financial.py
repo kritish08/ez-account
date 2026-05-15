@@ -23,17 +23,36 @@ router = APIRouter(prefix="/api", tags=["financial"])
 
 @router.post("/maintenance/fix-ledger")
 async def fix_ledger_data(current_user: dict = Depends(get_current_user)):
-    """One-time fix to ensure double-entry bookkeeping for historical data."""
+    """One-time fix to ensure double-entry bookkeeping for historical data.
+
+    Each phase pre-computes the set of source-doc ids whose target ledger
+    entry ALREADY exists (a single $match+$group aggregation), then iterates
+    the source docs and creates entries only for the ones not in the set.
+    Previously each phase ran a find_one per source doc — N+1 across seven
+    phases. On a tenant with thousands of historical records this used to
+    take minutes; now it's a small constant number of queries.
+    """
     fixed_counts = {"invoices": 0, "purchases": 0, "expenses": 0}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    async def _existing_ref_ids(filter_doc: dict) -> set[str]:
+        ids: set[str] = set()
+        async for row in db.ledger.find(filter_doc, {"_id": 0, "ref_id": 1}):
+            if row.get("ref_id"):
+                ids.add(row["ref_id"])
+        return ids
 
     # 1. Fix Invoices (Credit Sales)
-    invoices = await db.invoices.find({"status": {"$ne": "draft"}}).to_list(None)
-    for inv in invoices:
-        exists = await db.ledger.find_one({
-            "ref_id": inv["id"],
-            "account": "sales"
+    invoices = await db.invoices.find({"status": {"$ne": "draft"}}, {"_id": 0}).to_list(None)
+    if invoices:
+        already_sales = await _existing_ref_ids({
+            "ref_type": "invoice",
+            "account": "sales",
+            "ref_id": {"$in": [i["id"] for i in invoices]},
         })
-        if not exists:
+        for inv in invoices:
+            if inv["id"] in already_sales:
+                continue
             await create_ledger_entry(
                 account="sales",
                 debit=0,
@@ -41,18 +60,21 @@ async def fix_ledger_data(current_user: dict = Depends(get_current_user)):
                 narration=f"Invoice {inv['invoice_number']} (Retroactive Fix)",
                 ref_type="invoice",
                 ref_id=inv["id"],
-                date=inv["date"]
+                date=inv["date"],
             )
             fixed_counts["invoices"] += 1
 
     # 2. Fix Purchases (Debit Purchases)
-    purchases = await db.purchases.find({}).to_list(None)
-    for pur in purchases:
-        exists = await db.ledger.find_one({
-            "ref_id": pur["id"],
-            "account": "purchases"
+    purchases = await db.purchases.find({}, {"_id": 0}).to_list(None)
+    if purchases:
+        already_pur = await _existing_ref_ids({
+            "ref_type": "purchase",
+            "account": "purchases",
+            "ref_id": {"$in": [p["id"] for p in purchases]},
         })
-        if not exists:
+        for pur in purchases:
+            if pur["id"] in already_pur:
+                continue
             await create_ledger_entry(
                 account="purchases",
                 debit=pur["total"],
@@ -60,18 +82,21 @@ async def fix_ledger_data(current_user: dict = Depends(get_current_user)):
                 narration=f"Purchase {pur['purchase_number']} (Retroactive Fix)",
                 ref_type="purchase",
                 ref_id=pur["id"],
-                date=pur["date"]
+                date=pur["date"],
             )
             fixed_counts["purchases"] += 1
 
     # 3. Fix Expenses (Debit Expense Category)
-    expenses = await db.expenses.find({}).to_list(None)
-    for exp in expenses:
-        exists = await db.ledger.find_one({
-            "ref_id": exp["id"],
-            "account": {"$regex": "^expense:"}
+    expenses = await db.expenses.find({}, {"_id": 0}).to_list(None)
+    if expenses:
+        already_exp = await _existing_ref_ids({
+            "ref_type": "expense",
+            "account": {"$regex": "^expense:"},
+            "ref_id": {"$in": [e["id"] for e in expenses]},
         })
-        if not exists:
+        for exp in expenses:
+            if exp["id"] in already_exp:
+                continue
             await create_ledger_entry(
                 account=f"expense:{exp['category']}",
                 debit=exp["amount"],
@@ -79,59 +104,78 @@ async def fix_ledger_data(current_user: dict = Depends(get_current_user)):
                 narration=f"Expense: {exp['description']} (Retroactive Fix)",
                 ref_type="expense",
                 ref_id=exp["id"],
-                date=exp["date"]
+                date=exp["date"],
             )
             fixed_counts["expenses"] += 1
 
-    # 4. Fix Setup (Credit Capital)
-    business = await db.business.find_one({})
+    # 4. Fix Setup (Credit Capital) — fixed count, no need to batch.
+    business = await db.business.find_one({}, {"_id": 0})
     if business:
         if business.get("opening_cash", 0) > 0:
             exists = await db.ledger.find_one({"ref_type": "setup", "account": "capital", "narration": "Opening capital (cash)"})
             if not exists:
-                await create_ledger_entry("capital", 0, business["opening_cash"], "Opening capital (cash)", "setup", business["id"], business.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%d")))
+                await create_ledger_entry("capital", 0, business["opening_cash"], "Opening capital (cash)", "setup", business["id"], business.get("created_at", today))
                 fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
-
         if business.get("opening_bank", 0) > 0:
             exists = await db.ledger.find_one({"ref_type": "setup", "account": "capital", "narration": "Opening capital (bank)"})
             if not exists:
-                await create_ledger_entry("capital", 0, business["opening_bank"], "Opening capital (bank)", "setup", business["id"], business.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%d")))
+                await create_ledger_entry("capital", 0, business["opening_bank"], "Opening capital (bank)", "setup", business["id"], business.get("created_at", today))
                 fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
 
-    # 5. Fix Supplier Opening Balance (Debit Capital)
-    suppliers = await db.suppliers.find({"opening_balance": {"$gt": 0}}).to_list(None)
+    # 5+6. Suppliers and customers with opening balances — both keyed on
+    # ref_type="setup", account="capital", ref_id={party_id}, so one batched
+    # pre-fetch over the union of party ids handles both phases.
+    suppliers = await db.suppliers.find({"opening_balance": {"$gt": 0}}, {"_id": 0}).to_list(None)
+    customers = await db.customers.find({"opening_balance": {"$gt": 0}}, {"_id": 0}).to_list(None)
+    party_ids = [s["id"] for s in suppliers] + [c["id"] for c in customers]
+    already_setup = await _existing_ref_ids({
+        "ref_type": "setup",
+        "account": "capital",
+        "ref_id": {"$in": party_ids},
+    }) if party_ids else set()
     for sup in suppliers:
-        exists = await db.ledger.find_one({"ref_type": "setup", "account": "capital", "ref_id": sup["id"]})
-        if not exists:
-            # Liability -> Debit Capital
-            await create_ledger_entry("capital", sup["opening_balance"], 0, "Opening capital (supplier)", "setup", sup["id"], sup.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%d")))
-            fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
-
-    # 6. Fix Customer Opening Balance
-    customers = await db.customers.find({"opening_balance": {"$gt": 0}}).to_list(None)
+        if sup["id"] in already_setup:
+            continue
+        # Supplier liability -> Debit Capital
+        await create_ledger_entry("capital", sup["opening_balance"], 0, "Opening capital (supplier)", "setup", sup["id"], sup.get("created_at", today))
+        fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
     for cust in customers:
-        exists = await db.ledger.find_one({"ref_type": "setup", "account": "capital", "ref_id": cust["id"]})
-        if not exists:
-            if cust.get("balance_type", "debit") == "debit":
-                # Asset -> Credit Capital
-                await create_ledger_entry("capital", 0, cust["opening_balance"], "Opening capital (customer)", "setup", cust["id"], cust.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%d")))
-            else:
-                # Liability -> Debit Capital
-                await create_ledger_entry("capital", cust["opening_balance"], 0, "Opening capital (customer)", "setup", cust["id"], cust.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%d")))
-            fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
+        if cust["id"] in already_setup:
+            continue
+        if cust.get("balance_type", "debit") == "debit":
+            await create_ledger_entry("capital", 0, cust["opening_balance"], "Opening capital (customer)", "setup", cust["id"], cust.get("created_at", today))
+        else:
+            await create_ledger_entry("capital", cust["opening_balance"], 0, "Opening capital (customer)", "setup", cust["id"], cust.get("created_at", today))
+        fixed_counts["setup_capital"] = fixed_counts.get("setup_capital", 0) + 1
 
-    # 7. Fix Payments (Debit Cash/Bank, Credit Customer)
-    payments = await db.payments.find({}).to_list(None)
-    for pay in payments:
-        exists_dr = await db.ledger.find_one({"ref_type": "payment", "ref_id": pay["id"], "debit": pay["amount"]})
-        if not exists_dr:
-            await create_ledger_entry(pay["mode"], pay["amount"], 0, f"Payment from {pay['customer_name']}", "payment", pay["id"], pay["date"])
-            fixed_counts["payments"] = fixed_counts.get("payments", 0) + 1
+    # 7. Fix Payments (Debit Cash/Bank, Credit Customer). Each payment needs
+    # checks against TWO ledger sides — pre-fetch both sets up front.
+    payments = await db.payments.find({}, {"_id": 0}).to_list(None)
+    if payments:
+        pay_ids = [p["id"] for p in payments]
+        # Collect (ref_id, debit, credit) tuples to distinguish the two sides.
+        existing_dr: set[str] = set()
+        existing_cr: set[str] = set()
+        pay_map = {p["id"]: p["amount"] for p in payments}
+        async for row in db.ledger.find(
+            {"ref_type": "payment", "ref_id": {"$in": pay_ids}},
+            {"_id": 0, "ref_id": 1, "debit": 1, "credit": 1},
+        ):
+            amt = pay_map.get(row.get("ref_id"))
+            if amt is None:
+                continue
+            if row.get("debit") == amt:
+                existing_dr.add(row["ref_id"])
+            if row.get("credit") == amt:
+                existing_cr.add(row["ref_id"])
 
-        exists_cr = await db.ledger.find_one({"ref_type": "payment", "ref_id": pay["id"], "credit": pay["amount"]})
-        if not exists_cr:
-            await create_ledger_entry(f"customer:{pay['customer_id']}", 0, pay["amount"], "Payment received", "payment", pay["id"], pay["date"])
-            fixed_counts["payments"] = fixed_counts.get("payments", 0) + 1
+        for pay in payments:
+            if pay["id"] not in existing_dr:
+                await create_ledger_entry(pay["mode"], pay["amount"], 0, f"Payment from {pay['customer_name']}", "payment", pay["id"], pay["date"])
+                fixed_counts["payments"] = fixed_counts.get("payments", 0) + 1
+            if pay["id"] not in existing_cr:
+                await create_ledger_entry(f"customer:{pay['customer_id']}", 0, pay["amount"], "Payment received", "payment", pay["id"], pay["date"])
+                fixed_counts["payments"] = fixed_counts.get("payments", 0) + 1
 
     return {"message": "Ledger fixed successfully", "counts": fixed_counts}
 
