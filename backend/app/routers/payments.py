@@ -365,7 +365,7 @@ async def record_supplier_payment(supplier_id: str, amount: float, mode: str, da
             await db.debit_notes.insert_one(dn_doc)
             debit_note_id = dn_id
 
-    return {"message": "Supplier payment recorded", "id": payment_id}
+    return {"message": "Supplier payment recorded", "id": payment_id, "debit_note_id": debit_note_id}
 
 
 @router.delete("/supplier-payments/{payment_id}")

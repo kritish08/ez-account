@@ -111,8 +111,9 @@ async def get_voice_stats(credentials: HTTPAuthorizationCredentials = Depends(se
     """Voice assistant statistics — active sessions, states, etc."""
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
     except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+    if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
     ws_session_manager = get_manager()
