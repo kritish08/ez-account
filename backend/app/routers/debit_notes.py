@@ -84,16 +84,17 @@ async def create_debit_note(dn: DebitNoteCreate, current_user: dict = Depends(ge
     }
     await db.debit_notes.insert_one(dn_doc)
 
-    # Reduce supplier payable (debit the supplier account)
-    await create_ledger_entry(
-        f"supplier:{dn.supplier_id}", total, 0,
-        f"Debit Note {dn_number}", "debit_note", dn_id, dn_date
-    )
-
-    # Credit Purchases Returns (reduce expense)
-    await create_ledger_entry(
-        "purchases_returns", 0, total,
-        f"Debit Note {dn_number}", "debit_note", dn_id, dn_date
+    # Supplier-AP debit (reduces payable) + purchases_returns credit
+    # (reduces expense). Independent accounts — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            f"supplier:{dn.supplier_id}", total, 0,
+            f"Debit Note {dn_number}", "debit_note", dn_id, dn_date,
+        ),
+        create_ledger_entry(
+            "purchases_returns", 0, total,
+            f"Debit Note {dn_number}", "debit_note", dn_id, dn_date,
+        ),
     )
 
     return {"message": "Debit Note created", "id": dn_id, "debit_note_number": dn_number}
@@ -157,14 +158,17 @@ async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user
 
     # Re-create BOTH ledger entries to match create_debit_note. The previous
     # update only re-posted the supplier debit; the offsetting purchases_returns
-    # credit was permanently lost on the first edit, overstating purchase expenses.
-    await create_ledger_entry(
-        f"supplier:{existing['supplier_id']}", total, 0,
-        f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date
-    )
-    await create_ledger_entry(
-        "purchases_returns", 0, total,
-        f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date
+    # credit was permanently lost on the first edit, overstating purchase
+    # expenses. Independent accounts — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            f"supplier:{existing['supplier_id']}", total, 0,
+            f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date,
+        ),
+        create_ledger_entry(
+            "purchases_returns", 0, total,
+            f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date,
+        ),
     )
 
     return {"message": "Debit Note updated"}

@@ -314,26 +314,27 @@ async def record_supplier_payment(payment: SupplierPaymentCreate, current_user: 
 
     await db.supplier_payments.insert_one(payment_doc)
 
-    # Credit cash/bank
-    await create_ledger_entry(
-        account=payment.mode,
-        debit=0,
-        credit=payment.amount,
-        narration=f"Payment to {supplier['name']}",
-        ref_type="supplier_payment",
-        ref_id=payment_id,
-        date=payment_date
-    )
-
-    # Debit supplier account (reduce payable)
-    await create_ledger_entry(
-        account=f"supplier:{payment.supplier_id}",
-        debit=payment.amount,
-        credit=0,
-        narration="Payment made",
-        ref_type="supplier_payment",
-        ref_id=payment_id,
-        date=payment_date
+    # Cash/bank credit (money out) + supplier-AP debit (reduces payable).
+    # Independent accounts — gather.
+    await asyncio.gather(
+        create_ledger_entry(
+            account=payment.mode,
+            debit=0,
+            credit=payment.amount,
+            narration=f"Payment to {supplier['name']}",
+            ref_type="supplier_payment",
+            ref_id=payment_id,
+            date=payment_date,
+        ),
+        create_ledger_entry(
+            account=f"supplier:{payment.supplier_id}",
+            debit=payment.amount,
+            credit=0,
+            narration="Payment made",
+            ref_type="supplier_payment",
+            ref_id=payment_id,
+            date=payment_date,
+        ),
     )
 
     # Check for overpayment (Debit Note). Balance is usually negative
