@@ -141,16 +141,22 @@ async def create_invoice(invoice: InvoiceCreate, current_user: dict = Depends(ge
             ),
         )
 
-        # Reduce stock for product items
-        for item in items:
-            if item.get("product_id"):
-                await create_stock_movement(
-                    item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
-                    batch_id=item.get("batch_id"),
-                    serial_numbers=item.get("serial_numbers")
-                )
+        # Reduce stock for product items — each call hits different product
+        # docs in stock_movements + posts COGS/inventory-asset ledger pairs
+        # (independent across items), so fire them in one gather.
+        stock_ops = [
+            create_stock_movement(
+                item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                batch_id=item.get("batch_id"),
+                serial_numbers=item.get("serial_numbers"),
+            )
+            for item in items if item.get("product_id")
+        ]
+        if stock_ops:
+            await asyncio.gather(*stock_ops)
 
-        # Auto-apply customer credit ONLY if requested
+        # Auto-apply customer credit ONLY if requested. Must follow the
+        # stock-movement gather (apply_credit_to_invoice reads invoice state).
         if invoice.apply_credit:
             amount_due, credit_applied = await apply_credit_to_invoice(invoice.customer_id, invoice_id, total)
 
@@ -282,13 +288,16 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
             ),
         )
 
-        for item in items:
-            if item.get("product_id"):
-                await create_stock_movement(
-                    item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
-                    batch_id=item.get("batch_id"),
-                    serial_numbers=item.get("serial_numbers")
-                )
+        stock_ops = [
+            create_stock_movement(
+                item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                batch_id=item.get("batch_id"),
+                serial_numbers=item.get("serial_numbers"),
+            )
+            for item in items if item.get("product_id")
+        ]
+        if stock_ops:
+            await asyncio.gather(*stock_ops)
 
         if invoice_update.apply_credit:
             amount_due, credit_applied = await apply_credit_to_invoice(existing["customer_id"], invoice_id, total)
@@ -371,6 +380,7 @@ async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_u
     stock_map = await get_all_product_stock() if line_product_ids else {}
 
     stock_warnings = []
+    stock_ops = []
     for item in invoice["items"]:
         if item.get("product_id"):
             current_stock = stock_map.get(item["product_id"], 0)
@@ -380,11 +390,13 @@ async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_u
                     "current_stock": current_stock,
                     "required": item["quantity"]
                 })
-            await create_stock_movement(
+            stock_ops.append(create_stock_movement(
                 item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
                 batch_id=item.get("batch_id"),
-                serial_numbers=item.get("serial_numbers")
-            )
+                serial_numbers=item.get("serial_numbers"),
+            ))
+    if stock_ops:
+        await asyncio.gather(*stock_ops)
 
     amount_due = invoice["total"]
     credit_applied = 0
