@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from io import BytesIO
 from typing import Optional
 
-import qrcode
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import db
@@ -173,6 +172,10 @@ async def generate_product_labels(
     product = await db.products.find_one({"id": product_id}, {"_id": 0})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    # qrcode is only needed for this endpoint — keep the import inline so the
+    # rest of the routes don't drag it in at import time.
+    import qrcode  # noqa: PLC0415
 
     serials_list = []
     if serial_numbers:
