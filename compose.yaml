@@ -6,6 +6,12 @@
 # Usage:
 #   docker compose up -d --build
 
+# Pin the project name so images are always built as `ez-account-*`,
+# regardless of which directory the compose is run from (avoids the
+# worktree-dir-name leaking into image names like
+# `elated-lewin-eb9310-backend`).
+name: ez-account
+
 services:
   # ─────────────────────────────────────────────
   # FastAPI Backend
