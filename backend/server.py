@@ -82,6 +82,8 @@ from app.routers.business import router as business_router
 from app.routers.products import router as products_router
 from app.routers.customers import router as customers_router
 from app.routers.suppliers import router as suppliers_router
+from app.routers.bom import router as bom_router
+from app.routers.production import router as production_router
 
 
 # Internal imports
@@ -281,8 +283,6 @@ from app.schemas.payment import PaymentCreate, PaymentUpdate
 from app.schemas.expense import ExpenseCreate, ExpenseUpdate
 from app.schemas.credit_note import CreditNoteItem, CreditNoteCreate, CreditNoteUpdate
 from app.schemas.debit_note import DebitNoteItem, DebitNoteCreate, DebitNoteUpdate
-from app.schemas.bom import BOMComponent, BOMCreate
-from app.schemas.production import ProductionOrderCreate, ProductionOrderUpdate
 from app.schemas.settings import (
     ModulesSettings, BackupScheduleSettings, S3Settings,
     SystemSettings, SystemResetRequest,
@@ -297,306 +297,8 @@ from app.schemas.settings import (
 # ============== PRODUCTS + SUPPLIERS + CUSTOMERS ROUTES ==============
 # Moved to app/routers/{products,suppliers,customers}.py — see Phase 2 imports.
 
-# ============== BILL OF MATERIALS ==============
-
-@api_router.get("/products/{product_id}/bom")
-async def get_bom(product_id: str, current_user: dict = Depends(get_current_user)):
-    bom = await db.bill_of_materials.find_one({"product_id": product_id}, {"_id": 0})
-    if not bom:
-        return {"bom": None}
-    
-    # Enrich components with product info and current stock
-    enriched = []
-    for comp in bom.get("components", []):
-        mat = await db.products.find_one({"id": comp["material_id"]}, {"_id": 0})
-        stock = await get_product_stock(comp["material_id"])
-        required = comp["quantity"]
-        enriched.append({
-            **comp,
-            "material_name": mat["name"] if mat else "Unknown",
-            "material_unit": mat.get("unit", "pcs") if mat else "pcs",
-            "current_stock": stock,
-            "sufficient": stock >= required
-        })
-    bom["components"] = enriched
-    return {"bom": bom}
-
-@api_router.post("/products/{product_id}/bom")
-async def save_bom(product_id: str, bom_data: BOMCreate, current_user: dict = Depends(get_current_user)):
-    product = await db.products.find_one({"id": product_id})
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    # Reject self-reference. A product cannot consume itself as a component:
-    # this would cause infinite recursion in any future multi-level BOM expansion
-    # and is always a user error.
-    seen = set()
-    for c in bom_data.components:
-        if c.material_id == product_id:
-            raise HTTPException(
-                status_code=400,
-                detail="A product cannot include itself as a BOM component."
-            )
-        if c.material_id in seen:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Duplicate component '{c.material_id}' in BOM. Combine the quantities into one line."
-            )
-        seen.add(c.material_id)
-
-    # Use $setOnInsert for the id + created_at so an existing BOM keeps its
-    # stable id across edits. Production orders reference this id; without
-    # a stable id, `bom_id` was always None on every order.
-    bom_set = {
-        "product_id": product_id,
-        "version": bom_data.version,
-        "components": [c.model_dump() for c in bom_data.components],
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    bom_on_insert = {
-        "id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    await db.bill_of_materials.update_one(
-        {"product_id": product_id},
-        {"$set": bom_set, "$setOnInsert": bom_on_insert},
-        upsert=True,
-    )
-    return {"message": "BOM saved successfully"}
-
-# ============== PRODUCTION ORDERS ==============
-
-@api_router.get("/production-orders")
-async def list_production_orders(
-    status: Optional[str] = None,
-    product_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    query = {}
-    if status:
-        query["status"] = status
-    if product_id:
-        query["product_id"] = product_id
-    
-    orders = await db.production_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(None)
-    
-    # Enrich with product names
-    for o in orders:
-        p = await db.products.find_one({"id": o["product_id"]}, {"_id": 0})
-        o["product_name"] = p["name"] if p else "Unknown"
-    
-    return orders
-
-@api_router.post("/production-orders")
-async def create_production_order(order: ProductionOrderCreate, current_user: dict = Depends(get_current_user)):
-    product = await db.products.find_one({"id": order.product_id}, {"_id": 0})
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    bom = await db.bill_of_materials.find_one({"product_id": order.product_id}, {"_id": 0})
-    
-    # Generate order number atomically (count_documents is racy and reuses
-    # numbers when orders are deleted).
-    order_number = f"WO-{str(await _next_seq('production_order')).zfill(4)}"
-    
-    # Calculate ingredients needed
-    ingredients = []
-    if bom:
-        for comp in bom.get("components", []):
-            ingredients.append({
-                "material_id": comp["material_id"],
-                "quantity_required": comp["quantity"] * order.quantity,
-                "quantity_consumed": 0,
-                "batch_id": None
-            })
-    
-    order_doc = {
-        "id": str(uuid.uuid4()),
-        "order_number": order_number,
-        "product_id": order.product_id,
-        "bom_id": bom["id"] if bom and "id" in bom else None,
-        "quantity": order.quantity,
-        "batch_id": order.batch_id,
-        "status": "PLANNED",
-        "notes": order.notes or "",
-        "planned_start_date": order.planned_start_date,
-        "started_at": None,
-        "completed_at": None,
-        "ingredients": ingredients,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": current_user.get("email", "")
-    }
-    await db.production_orders.insert_one(order_doc)
-    order_doc.pop("_id", None)
-    return {"message": "Production order created", "order": order_doc}
-
-@api_router.get("/production-orders/{order_id}")
-async def get_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
-    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Enrich
-    p = await db.products.find_one({"id": order["product_id"]}, {"_id": 0})
-    order["product_name"] = p["name"] if p else "Unknown"
-    
-    for ing in order.get("ingredients", []):
-        mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
-        ing["material_name"] = mat["name"] if mat else "Unknown"
-        ing["current_stock"] = await get_product_stock(ing["material_id"])
-    
-    return order
-
-@api_router.put("/production-orders/{order_id}/start")
-async def start_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Atomically claim the PLANNED -> IN_PROGRESS transition so two concurrent
-    # callers can't both consume the same raw materials.
-    order = await db.production_orders.find_one_and_update(
-        {"id": order_id, "status": "PLANNED"},
-        {"$set": {"status": "IN_PROGRESS", "started_at": now_iso}},
-        return_document=ReturnDocument.BEFORE,
-    )
-    if not order:
-        existing = await db.production_orders.find_one({"id": order_id})
-        if not existing:
-            raise HTTPException(status_code=404, detail="Order not found")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot start order in status: {existing['status']}"
-        )
-
-    # Verify ALL ingredients sufficient before consuming any. If anything is
-    # short, roll the status back so the user can retry after restocking.
-    for ing in order.get("ingredients", []):
-        available = await get_product_stock(ing["material_id"])
-        if available < ing["quantity_required"]:
-            mat = await db.products.find_one({"id": ing["material_id"]}, {"_id": 0})
-            name = mat["name"] if mat else ing["material_id"]
-            await db.production_orders.update_one(
-                {"id": order_id},
-                {"$set": {"status": "PLANNED"}, "$unset": {"started_at": ""}}
-            )
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient stock for '{name}': need {ing['quantity_required']}, have {round(available, 4)}"
-            )
-
-    # Consume — if anything below raises, leave the order IN_PROGRESS so an
-    # operator can investigate rather than silently double-consuming on retry.
-    for ing in order.get("ingredients", []):
-        await create_stock_movement(
-            product_id=ing["material_id"],
-            quantity_in=0,
-            quantity_out=ing["quantity_required"],
-            ref_type="PRODUCTION_CONSUMED",
-            ref_id=order_id,
-            date=today,
-            batch_id=ing.get("batch_id")
-        )
-        await db.production_orders.update_one(
-            {"id": order_id, "ingredients.material_id": ing["material_id"]},
-            {"$set": {"ingredients.$.quantity_consumed": ing["quantity_required"]}}
-        )
-    return {"message": "Production order started. Raw materials consumed from stock."}
-
-@api_router.put("/production-orders/{order_id}/qc")
-async def send_to_qc(order_id: str, current_user: dict = Depends(get_current_user)):
-    """Move a started work order into QC review before final completion."""
-    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order["status"] != "IN_PROGRESS":
-        raise HTTPException(status_code=400, detail=f"Only IN_PROGRESS orders can be sent to QC (current: {order['status']})")
-    await db.production_orders.update_one(
-        {"id": order_id},
-        {"$set": {"status": "QC", "qc_at": datetime.now(timezone.utc).isoformat()}}
-    )
-    return {"message": "Order moved to QC. Review and then mark as Completed."}
-
-@api_router.put("/production-orders/{order_id}/complete")
-async def complete_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Atomically flip the status. If anyone else already completed/cancelled
-    # this order (network retry, second tab), find_one_and_update returns None
-    # so we don't double-credit finished goods.
-    order = await db.production_orders.find_one_and_update(
-        {"id": order_id, "status": {"$in": ["IN_PROGRESS", "QC"]}},
-        {"$set": {"status": "COMPLETED", "completed_at": now_iso}},
-        return_document=ReturnDocument.BEFORE,
-    )
-    if not order:
-        existing = await db.production_orders.find_one({"id": order_id})
-        if not existing:
-            raise HTTPException(status_code=404, detail="Order not found")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot complete order in status: {existing['status']}"
-        )
-
-    # Add finished goods to stock via canonical create_stock_movement.
-    # If this fails after we've already flipped status, roll the status back
-    # so the user can retry instead of being stuck in COMPLETED with no output.
-    try:
-        await create_stock_movement(
-            product_id=order["product_id"],
-            quantity_in=order["quantity"],
-            quantity_out=0,
-            ref_type="PRODUCTION_OUTPUT",
-            ref_id=order_id,
-            date=today,
-            batch_id=order.get("batch_id")
-        )
-    except Exception as e:
-        await db.production_orders.update_one(
-            {"id": order_id},
-            {"$set": {"status": order["status"]}, "$unset": {"completed_at": ""}}
-        )
-        logger.error(f"Rolled back production order {order_id} completion: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to record finished goods: {e}")
-
-    # Batch record is now created inside `create_stock_movement` (gated on
-    # `product.track_batches`). Doing it here too would double-count the
-    # finished-good batch quantity.
-    #
-    # Status was already flipped to COMPLETED atomically at the top of this
-    # function via `find_one_and_update`; no need to set it again.
-    return {"message": f"Production order completed. {order['quantity']} units added to finished goods stock."}
-
-@api_router.put("/production-orders/{order_id}/cancel")
-async def cancel_production_order(order_id: str, current_user: dict = Depends(get_current_user)):
-    order = await db.production_orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order["status"] == "COMPLETED":
-        raise HTTPException(status_code=400, detail="Cannot cancel a completed order")
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # Return already-consumed materials to stock
-    if order["status"] in ["IN_PROGRESS", "QC"]:
-        for ing in order.get("ingredients", []):
-            consumed = ing.get("quantity_consumed", 0)
-            if consumed > 0:
-                await create_stock_movement(
-                    product_id=ing["material_id"],
-                    quantity_in=consumed,
-                    quantity_out=0,
-                    ref_type="PRODUCTION_RETURN",
-                    ref_id=order["id"],
-                    date=today,
-                    batch_id=ing.get("batch_id")
-                )
-
-    await db.production_orders.update_one(
-        {"id": order["id"]},
-        {"$set": {"status": "CANCELLED", "cancelled_at": datetime.now(timezone.utc).isoformat()}}
-    )
-    return {"message": "Production order cancelled. Materials returned to stock."}
+# ============== BOM + PRODUCTION ROUTES ==============
+# Moved to app/routers/{bom,production}.py — see Phase 2 imports.
 
 # ============== PURCHASES ==============
 
@@ -3680,6 +3382,8 @@ app.include_router(business_router)
 app.include_router(products_router)
 app.include_router(customers_router)
 app.include_router(suppliers_router)
+app.include_router(bom_router)
+app.include_router(production_router)
 
 # CORS — explicit origin list required when credentials are enabled.
 # Browsers reject `*` + credentials per the CORS spec, so we never allow that combo.
