@@ -1188,6 +1188,32 @@ Open `http://localhost:8080`, log in with `test@best.com` / `password_123`, go t
 
 ---
 
+## SNAPSHOT-CLEANUP — close out the "deferred" items from the snapshot review  🔬
+
+**Context:** I'd deferred a handful of items from the server snapshot earlier. With the DB confirmed demo-only, the only real blocker (backup-envelope format) became moot — the items were re-triaged and the ones with value got ported.
+
+### Ported
+
+1. **`backup/backup.py`** — snapshot version is a genuine upgrade:
+   - New `decrypt_envelope(encrypted_package, hex_key)` helper that mirrors `server.py::decrypt_data`. Useful for any external tool that needs to read backup contents.
+   - **Support for encrypted-at-rest S3 secret keys.** The reader now checks for `s3_settings["aws_secret_access_key_encrypted"]` first and decrypts it via `decrypt_envelope`; falls back to the legacy plaintext key with a warning. When/if the server-side `POST /api/settings/s3` is updated to encrypt the secret before storing, no changes are needed in the backup sidecar.
+   - Backup container is currently `profiles: donotstart` in `compose.override.yaml` (local-dev only), so this is a pure code-quality / future-proofing port — no runtime impact today.
+
+2. **`backend/test_fido.py`** — small standalone script that exercises `fido2.server.RegistrationResponse.from_dict`. Useful as a quick smoke when iterating on passkey changes:
+   ```bash
+   docker exec ez-backend python test_fido.py
+   ```
+
+3. **`core-breakage-report.md`** — 676-line architectural audit doc (someone earlier ran a fragility review on the codebase). Most of its recommendations have already been addressed by the audit's 80+ fixes — kept in-tree as historical context and to acknowledge prior work.
+
+### Skipped (with reasons)
+
+- **`test_ledger.py` / `test_ledger_full.py`** — tiny loops over the customer ledger. Functionality already covered by the existing `backend/verify_*.py` files. Skipping to avoid duplication.
+- **`test_customer_ledger_fix.sh`** — placeholder file: `echo "All done."` (literally one line). Nothing to port.
+- **`docs/superpowers/plans/`** — empty directory in the snapshot. Nothing to port.
+
+---
+
 ## OPS-BATCH-B — SearchableProductSelect + LiveCamera + product search API  🔬
 
 **Severity:** UX upgrades + new backend filter
