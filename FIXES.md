@@ -1024,6 +1024,77 @@ While a backup is in flight, other API requests respond normally.
 
 ---
 
+# IMS & Production deep-drill — 3 follow-up fixes
+
+After a live end-to-end smoke test of the Advanced IMS + Production modules, three real gaps surfaced. All three are now closed and verified against the running docker stack.
+
+---
+
+## IMS-BATCH-FROM-PURCHASE — Purchase receipts now write batch docs  🔬
+
+**Severity:** P1 (advertised IMS feature didn't actually work for the most common case)
+**Files:** `backend/server.py:create_stock_movement` (~989) · `complete_production_order` (~1521)
+
+### Root cause
+The Advanced IMS toggle promised "Batches" tracking, but `create_stock_movement` only inserted serial-number records — it never touched `db.batches`. Only `complete_production_order` had an explicit `db.batches` upsert for the finished-good output. So if a user purchased 100 kg of flour with `batch_id: "B-2026-001"`, the batch_id was stored on the `stock_movements` row but **no document appeared under `GET /products/{id}/batches`**. A core feature of the IMS module silently did nothing for raw-material purchases.
+
+### Fix
+Moved batch upsert into `create_stock_movement` so it fires for **any** inbound stock movement (purchases, production output, manual adjustments) where `product.track_batches` is true and `batch_id` is provided. Uses `$inc` on existing batches and `$setOnInsert` for new ones — same batch_id received twice atomically accumulates.
+
+Removed the now-duplicate explicit upsert from `complete_production_order` (would have double-counted finished-good batches otherwise).
+
+Outbound consumption from a tracked batch also decrements the batch quantity.
+
+### Verify
+1. Purchase 50 kg of a `track_batches` raw material with `batch_id: "X"` → `GET /products/{id}/batches` returns one doc, `quantity: 50, source: "purchase"`.
+2. Purchase 20 kg more with the same batch_id → same doc, quantity now 70.
+3. Run a production order that consumes that material's batch → batch quantity drops by the consumed amount.
+4. Finished-good batch (from a production order) appears **exactly once** under the FG's batches — no double-count.
+
+---
+
+## VALIDATOR-NUM-PRODUCT — Product price/stock validators added  🔬
+
+**Severity:** P2 (gap in the P2 VALIDATOR-NUM pass)
+**File:** `backend/server.py:213` (`ProductCreate`, `ProductUpdate`)
+
+### Root cause
+The earlier VALIDATOR-NUM pass added `gt=0`/`ge=0` to PurchaseItem, InvoiceLineItem, PaymentCreate, ExpenseCreate, CN/DN items, and Customer/Supplier opening balances — but missed `ProductCreate` itself. Confirmed via live POST: `selling_price=-1` returned HTTP 200 and the product persisted (visible as "Bad product" in the IMS smoke test output).
+
+### Fix
+Added `Field(..., ge=0)` to `selling_price`, `cost_price`, `stock_quantity`, `opening_stock`, `low_stock_threshold`, and `reorder_point` on both `ProductCreate` and `ProductUpdate`.
+
+### Verify
+1. `POST /api/products {"selling_price":-1, ...}` → HTTP 422 (was 200).
+2. `POST {"cost_price":-5}` → 422.
+3. `POST {"selling_price":0}` → 200 (free-item case still works).
+4. `PUT /api/products/{id} {"selling_price":-100}` → 422 (Update guarded too).
+
+---
+
+## BOM-STABLE-ID — BOM doc gets a stable id, production orders carry it  🔬
+
+**Severity:** P2 (data-model inconsistency)
+**Files:** `backend/server.py:save_bom` (~1316) · lifespan backfill (~189)
+
+### Root cause
+`save_bom` upserted with `$set` only — the doc had `product_id`, `version`, `components`, `updated_at` but never an `id` field. `create_production_order` at line ~1170 reads `bom["id"] if bom and "id" in bom else None`, so `bom_id` on every production order was always `null`. Today the field is unused (orders snapshot their own ingredients), but it's a misleading data shape and would break any future code that joined orders back to their source BOM.
+
+### Fix
+1. **`save_bom`** now writes via `$set + $setOnInsert`:
+   - `$set` updates components/version/updated_at on every save
+   - `$setOnInsert` adds `id` (new UUID) and `created_at` **only** on the first insert
+   - Existing ids preserved across edits, version bumps, BOM changes
+2. **One-time migration in lifespan**: backfills `id` on any pre-existing BOM doc that lacks it. Logs `Backfilled id on N legacy BOM docs.` on first boot.
+
+### Verify
+1. Save a BOM for a product → `db.bill_of_materials.findOne({product_id})` has an `id` field.
+2. Save a new version of the same BOM → `id` is unchanged.
+3. Create a production order against that product → `order.bom_id === bom.id`.
+4. Restart backend with legacy BOMs (no `id` field) → startup log shows backfill count and all BOMs now have ids.
+
+---
+
 # Deferred — Known issues NOT fixed in this pass
 
 Listed so they aren't forgotten. Each will need its own scoped session.
@@ -1082,5 +1153,8 @@ When you sit down to verify, this is roughly the order that will catch regressio
 36. **Login autofill** → browsers offer saved credentials.
 37. **Print labels** → opens print dialog (was silently failing under strict CSPs).
 38. **Invoice delete button** → shows "Deleting…" and disables itself during the request.
+39. **Purchase batch tracking** → buy 50 kg of a `track_batches=true` raw material with `batch_id: "X"` → `GET /products/{id}/batches` returns it with `quantity: 50, source: "purchase"`. Buy 20 more with same batch_id → quantity becomes 70 (atomic `$inc`).
+40. **Product price validators** → `POST /api/products {selling_price:-1}` returns HTTP 422 (was silently accepting before).
+41. **BOM stable id** → save BOM v1, then save BOM v2 → `db.bill_of_materials.findOne({product_id}).id` is identical across both saves. Production order created after has `bom_id` matching the BOM's id (was always `null`).
 
 

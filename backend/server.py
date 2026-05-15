@@ -186,6 +186,21 @@ async def lifespan(app: FastAPI):
     await _seed_counter_from_max("debit_note", "debit_notes", "debit_note_number", "DN-")
     await _seed_counter_from_max("production_order", "production_orders", "order_number", "WO-")
 
+    # One-time migration: backfill `id` on BOMs created before the stable-id
+    # fix. Without an id, production-order `bom_id` is always null because
+    # the order copies it via `bom["id"] if bom and "id" in bom else None`.
+    try:
+        missing_id_count = await db.bill_of_materials.count_documents({"id": {"$exists": False}})
+        if missing_id_count:
+            async for bom in db.bill_of_materials.find({"id": {"$exists": False}}, {"_id": 1}):
+                await db.bill_of_materials.update_one(
+                    {"_id": bom["_id"]},
+                    {"$set": {"id": str(uuid.uuid4())}},
+                )
+            logger.info(f"Backfilled `id` on {missing_id_count} legacy BOM docs.")
+    except Exception as e:
+        logger.warning(f"BOM id backfill skipped: {e}")
+
     logger.info("MongoDB indexes & counters initialised.")
 
     yield
@@ -219,12 +234,15 @@ class ProductCreate(BaseModel):
     unit: str = "pcs"
     category: Optional[str] = None
     item_type: str = "FINISHED_GOOD"  # RAW_MATERIAL | SEMI_FINISHED | FINISHED_GOOD | CONSUMABLE | SERVICE
-    selling_price: float
-    cost_price: float = 0
-    stock_quantity: float = 0
-    opening_stock: float = 0
-    low_stock_threshold: float = 10
-    reorder_point: float = 0
+    # All price/stock fields are non-negative. Free items (price=0) are
+    # allowed; negative prices/stock are nonsense and would corrupt every
+    # downstream report.
+    selling_price: float = Field(..., ge=0)
+    cost_price: float = Field(default=0, ge=0)
+    stock_quantity: float = Field(default=0, ge=0)
+    opening_stock: float = Field(default=0, ge=0)
+    low_stock_threshold: float = Field(default=10, ge=0)
+    reorder_point: float = Field(default=0, ge=0)
     track_batches: bool = False
     track_serials: bool = False
 
@@ -237,11 +255,11 @@ class ProductUpdate(BaseModel):
     unit: Optional[str] = None
     category: Optional[str] = None
     item_type: Optional[str] = None
-    selling_price: Optional[float] = None
-    cost_price: Optional[float] = None
-    stock_quantity: Optional[float] = None
-    low_stock_threshold: Optional[float] = None
-    reorder_point: Optional[float] = None
+    selling_price: Optional[float] = Field(default=None, ge=0)
+    cost_price: Optional[float] = Field(default=None, ge=0)
+    stock_quantity: Optional[float] = Field(default=None, ge=0)
+    low_stock_threshold: Optional[float] = Field(default=None, ge=0)
+    reorder_point: Optional[float] = Field(default=None, ge=0)
     track_batches: Optional[bool] = None
     track_serials: Optional[bool] = None
 
@@ -991,6 +1009,33 @@ async def create_stock_movement(product_id: str, quantity_in: float, quantity_ou
     if settings.get("enable_advanced_ims", False):
         product = await db.products.find_one({"id": product_id})
         if product:
+            # Batch tracking — applies to ANY inbound stock movement with a
+            # batch_id (purchases, production output, manual adjustments).
+            # Previously only the production-output path inserted batch docs,
+            # so purchase batches were silently lost.
+            if quantity_in > 0 and product.get("track_batches") and batch_id:
+                await db.batches.update_one(
+                    {"product_id": product_id, "batch_number": batch_id},
+                    {
+                        "$inc": {"quantity": quantity_in},
+                        "$setOnInsert": {
+                            "id": str(uuid.uuid4()),
+                            "product_id": product_id,
+                            "batch_number": batch_id,
+                            "source": ref_type,
+                            "source_id": ref_id,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    },
+                    upsert=True,
+                )
+            # Batch consumption — decrement on outbound, never below zero.
+            if quantity_out > 0 and product.get("track_batches") and batch_id:
+                await db.batches.update_one(
+                    {"product_id": product_id, "batch_number": batch_id},
+                    {"$inc": {"quantity": -quantity_out}},
+                )
+
             if quantity_in > 0 and product.get("track_serials") and serial_numbers:
                 for sn in serial_numbers:
                     await db.serial_numbers.insert_one({
@@ -1283,16 +1328,23 @@ async def save_bom(product_id: str, bom_data: BOMCreate, current_user: dict = De
             )
         seen.add(c.material_id)
 
-    bom_doc = {
+    # Use $setOnInsert for the id + created_at so an existing BOM keeps its
+    # stable id across edits. Production orders reference this id; without
+    # a stable id, `bom_id` was always None on every order.
+    bom_set = {
         "product_id": product_id,
         "version": bom_data.version,
         "components": [c.model_dump() for c in bom_data.components],
-        "updated_at": datetime.now(timezone.utc).isoformat()
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    bom_on_insert = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.bill_of_materials.update_one(
         {"product_id": product_id},
-        {"$set": bom_doc},
-        upsert=True
+        {"$set": bom_set, "$setOnInsert": bom_on_insert},
+        upsert=True,
     )
     return {"message": "BOM saved successfully"}
 
@@ -1491,29 +1543,12 @@ async def complete_production_order(order_id: str, current_user: dict = Depends(
         logger.error(f"Rolled back production order {order_id} completion: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to record finished goods: {e}")
 
-    # If a batch_id is set, upsert the batch record
-    if order.get("batch_id"):
-        existing_batch = await db.batches.find_one({"product_id": order["product_id"], "batch_number": order["batch_id"]})
-        if existing_batch:
-            await db.batches.update_one(
-                {"product_id": order["product_id"], "batch_number": order["batch_id"]},
-                {"$inc": {"quantity": order["quantity"]}}
-            )
-        else:
-            await db.batches.insert_one({
-                "id": str(uuid.uuid4()),
-                "product_id": order["product_id"],
-                "batch_number": order["batch_id"],
-                "quantity": order["quantity"],
-                "source": "production_order",
-                "source_id": order_id,
-                "created_at": now_iso
-            })
-
-    await db.production_orders.update_one(
-        {"id": order_id},
-        {"$set": {"status": "COMPLETED", "completed_at": now_iso}}
-    )
+    # Batch record is now created inside `create_stock_movement` (gated on
+    # `product.track_batches`). Doing it here too would double-count the
+    # finished-good batch quantity.
+    #
+    # Status was already flipped to COMPLETED atomically at the top of this
+    # function via `find_one_and_update`; no need to set it again.
     return {"message": f"Production order completed. {order['quantity']} units added to finished goods stock."}
 
 @api_router.put("/production-orders/{order_id}/cancel")
