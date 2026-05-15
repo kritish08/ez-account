@@ -1188,6 +1188,49 @@ Open `http://localhost:8080`, log in with `test@best.com` / `password_123`, go t
 
 ---
 
+## OPS-BATCH-B — SearchableProductSelect + LiveCamera + product search API  🔬
+
+**Severity:** UX upgrades + new backend filter
+**Files:** `backend/server.py` (`/products` search param), `frontend/src/components/SearchableProductSelect.js` (new), `frontend/src/components/LiveCamera.js` (new), `frontend/src/components/ui/command.jsx` (new shadcn), `frontend/src/components/ui/popover.jsx` (new shadcn), `frontend/src/pages/CreateInvoice.js`, `frontend/src/pages/EditInvoice.js`, `frontend/src/pages/Purchases.js`, `frontend/src/pages/ProductionOrders.js`
+
+### Backend: `/products?search=` + `?limit=`
+The dropdown component does a debounced `getProducts({search: query})` as the user types. The endpoint previously had no `search` parameter — it returned the entire product list every call. Added a case-insensitive regex match on `name` OR `sku`, with `re.escape` so a user typing `.*` or `(foo` doesn't break the regex. Also added an optional `limit` cap (defaults unlimited; the dropdown asks for 50).
+
+### SearchableProductSelect
+shadcn Command + Popover combobox. Replaces the native `<Select>` on four pages where line-item rows had to render every product:
+
+- **CreateInvoice** — invoice line items
+- **EditInvoice** — invoice line items
+- **Purchases** — purchase line items (filtered to `raw_material,wip`)
+- **ProductionOrders** — finished-good picker, BOM-builder material picker, both filtered
+
+Component takes a `products` array (used as the initial render until the popover opens) plus optional `itemType` filter and `includeManual` flag for the "free-text item" case on invoices. Debounces server hits at 300 ms.
+
+**Bonus:** swapped the snapshot's `lodash.debounce` for a 5-line inline implementation so we don't pull in lodash (~70 KB minified) just for one helper. Bundle stays lodash-free (verified).
+
+### LiveCamera
+Camera-based image capture component (`navigator.mediaDevices.getUserMedia` with `facingMode: environment`, plus a native `<input type=file capture>` fallback for browsers that block the live camera API). Snapshot used it for the AI invoice-scan flow. **Component is committed but not yet wired into pages** — wiring requires touching CreateInvoice/Purchases file-upload handlers which already work; leaving that as a follow-up rather than expanding scope.
+
+### Verified (live smoke against the running stack)
+```
+✓ Seeded 5 products: Bread loaf, Yeast packet, Flour 50kg, Almond butter, Whole-wheat flour
+✓ GET /products?search=flour            → 2 hits  (Flour 50kg, Whole-wheat flour)
+✓ GET /products?search=FLOUR            → 2 hits  (case-insensitive)
+✓ GET /products?search=zzzzz            → 0 hits  (graceful empty)
+✓ GET /products?search=.*&limit=2       → 0 hits  (regex metachars escaped — `.` is literal, not "any")
+✓ GET /products?search=flour&item_type=finished_good → 2 hits, all item_type=finished_good
+✓ Bundle contains: "/products?search", "Free text item", getUserMedia (LiveCamera)
+✓ Bundle does NOT contain lodash (debounce is inlined)
+```
+
+### Browser-side test
+1. http://localhost:8080 → login → **Invoices → New Invoice**
+2. In a line-item row, click the product dropdown — type "fl" — see only matching products. Pick one. The line description / rate auto-fills.
+3. Same on **Edit Invoice**, **Purchases → New Purchase**, **Production → New Order**.
+4. The dropdown also accepts free-text on invoice line items ("Free text item" option at the top).
+
+---
+
 ## OPS-BATCH-A — Health endpoint, auto-backup cron, SupplierDetail, env templates  🔬
 
 **Severity:** Feature ports from server snapshot (Batch A)

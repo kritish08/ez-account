@@ -7,6 +7,7 @@ import {
   getProducts, getProductBOM, saveProductBOM
 } from "../lib/api";
 import { Button } from "../components/ui/button";
+import { SearchableProductSelect } from "../components/SearchableProductSelect";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
@@ -330,16 +331,13 @@ const ProductionOrders = () => {
           <form onSubmit={handleCreate} className="space-y-4 mt-2">
             <div className="space-y-2">
               <Label>Finished Product *</Label>
-              <Select onValueChange={handleProductSelect} value={formData.product_id}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select product to produce..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {products.filter(p => !["raw_material", "consumable", "service"].includes(p.item_type)).map(p => (
-                    <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SearchableProductSelect
+                products={products.filter(p => !["raw_material", "consumable", "service"].includes(p.item_type))}
+                value={formData.product_id}
+                onValueChange={handleProductSelect}
+                placeholder="Select product to produce..."
+                itemType="finished_good"
+              />
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -518,17 +516,16 @@ const ProductionOrders = () => {
             {!bomBuilderProduct ? (
               <div className="space-y-2">
                 <Label>Select Finished Product</Label>
-                <Select onValueChange={v => {
-                  const p = products.find(x => x.id === v);
-                  if (p) openBomBuilder(p);
-                }}>
-                  <SelectTrigger><SelectValue placeholder="Choose product..." /></SelectTrigger>
-                  <SelectContent>
-                    {products.filter(p => !["raw_material", "consumable", "service"].includes(p.item_type)).map(p => (
-                      <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SearchableProductSelect
+                  products={products.filter(p => !["raw_material", "consumable", "service"].includes(p.item_type))}
+                  value=""
+                  onValueChange={v => {
+                    const p = products.find(x => x.id === v);
+                    if (p) openBomBuilder(p);
+                  }}
+                  placeholder="Choose product..."
+                  itemType="finished_good"
+                />
               </div>
             ) : (
               <>
@@ -546,20 +543,16 @@ const ProductionOrders = () => {
                   {bomComponents.map((comp, idx) => (
                     <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                       <div className="col-span-6">
-                        <Select value={comp.material_id} onValueChange={v => {
-                          const updated = [...bomComponents];
-                          updated[idx].material_id = v;
-                          setBomComponents(updated);
-                        }}>
-                          <SelectTrigger className="text-sm">
-                            <SelectValue placeholder="Material..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {products.filter(p => p.id !== bomBuilderProduct.id).map(p => (
-                              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <SearchableProductSelect
+                          products={products.filter(p => p.id !== bomBuilderProduct.id)}
+                          value={comp.material_id}
+                          onValueChange={v => {
+                            const updated = [...bomComponents];
+                            updated[idx].material_id = v;
+                            setBomComponents(updated);
+                          }}
+                          placeholder="Material..."
+                        />
                       </div>
                       <div className="col-span-3">
                         <Input type="number" min="0.001" step="0.001" value={comp.quantity} className="font-mono text-sm"

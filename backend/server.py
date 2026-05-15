@@ -1601,14 +1601,33 @@ async def create_product(product: ProductCreate, current_user: dict = Depends(ge
     return {"message": "Product created", "id": product_id}
 
 @api_router.get("/products")
-async def list_products(item_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+async def list_products(
+    item_type: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
     query = {}
     if item_type:
         # Support comma separated if multiple types needed
         types = [t.strip() for t in item_type.split(",")]
         query["item_type"] = {"$in": types} if len(types) > 1 else types[0]
-        
-    products = await db.products.find(query, {"_id": 0}).sort("name", 1).to_list(None)
+
+    if search:
+        # Case-insensitive match against name OR sku — used by the
+        # SearchableProductSelect dropdown for fast type-to-find on
+        # invoice / purchase / production-order line items.
+        # `re.escape` so users can paste raw input without breaking the regex.
+        import re as _re
+        safe = _re.escape(search)
+        query["$or"] = [
+            {"name": {"$regex": safe, "$options": "i"}},
+            {"sku":  {"$regex": safe, "$options": "i"}},
+        ]
+
+    cursor = db.products.find(query, {"_id": 0}).sort("name", 1)
+    # When the dropdown calls us, it doesn't need every product — cap to 50.
+    products = await cursor.to_list(limit if limit and limit > 0 else None)
     
     for product in products:
         product["current_stock"] = await get_product_stock(product["id"])

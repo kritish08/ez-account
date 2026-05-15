@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { Alert, AlertDescription } from "../components/ui/alert";
+import { SearchableProductSelect } from "../components/SearchableProductSelect";
 import { Skeleton } from "../components/ui/skeleton";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, Loader2, Package, Info } from "lucide-react";
@@ -231,25 +232,13 @@ const EditInvoice = () => {
                 <div className="col-span-12 md:col-span-5 space-y-2">
                   <Label className="text-xs text-slate-500">Product or Description</Label>
                   <div className="space-y-2">
-                    <Select
+                    <SearchableProductSelect
+                      products={products}
                       value={item.product_id || "manual_entry"}
                       onValueChange={(value) => handleItemChange(index, "product_id", value)}
-                    >
-                      <SelectTrigger data-testid={`edit-item-product-${index}`}>
-                        <SelectValue placeholder="Select product (optional)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="manual_entry">Free text item</SelectItem>
-                        {products.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            <div className="flex items-center gap-2">
-                              <Package className="h-3 w-3 text-slate-400" />
-                              {p.name}
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      includeManual={true}
+                      placeholder="Search product (optional)"
+                    />
                     <Input
                       value={item.description}
                       onChange={(e) => handleItemChange(index, "description", e.target.value)}
