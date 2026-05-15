@@ -28,7 +28,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.database import db
+from app.database import client, db
 from app.deps import get_current_user
 from app.schemas.payment import PaymentCreate, SupplierPaymentCreate
 from app.services.counters import get_next_debit_note_number
@@ -61,152 +61,162 @@ async def record_payment(payment: PaymentCreate, current_user: dict = Depends(ge
         "created_at": datetime.now(timezone.utc).isoformat()
     }
 
-    await db.payments.insert_one(payment_doc)
+    # Wrap every write in a single multi-document transaction. Either
+    # ALL of {payment doc, cash debit, invoice update, allocation doc,
+    # customer credit, optional advance doc + advance credit, optional
+    # CN/advance application side-effects} commit, or none do. A mid-
+    # flight crash leaves no torn state (the previous code could land
+    # cash debit + payment doc but no invoice update, leaving the
+    # customer's outstanding balance silently wrong). Requires a Mongo
+    # replica set — Atlas (and `mongodb-atlas-local`) supplies one.
+    async with await client.start_session() as session:
+        async with session.start_transaction():
+            await db.payments.insert_one(payment_doc, session=session)
 
-    await create_ledger_entry(
-        account=payment.mode,
-        debit=payment.amount,
-        credit=0,
-        narration=f"Payment from {customer['name']}",
-        ref_type="payment",
-        ref_id=payment_id,
-        date=payment_date
-    )
-
-    excess = 0
-    credit_note_applied_amount = 0
-
-    # Step 1: Apply any existing Credit Note to the invoice FIRST (before cash payment)
-    if payment.credit_note_id and payment.invoice_id:
-        credit_note_applied_amount = await apply_credit_note_to_invoice(payment.credit_note_id, payment.invoice_id)
-
-    advance_applied_amount = 0
-    if payment.advance_payment_id and payment.invoice_id:
-        advance_applied_amount = await apply_advance_payment_to_invoice(payment.advance_payment_id, payment.invoice_id)
-
-    # Step 2: Determine how much cash actually needs to go to invoices
-    applied_to_invoices = 0  # track actual invoice allocation for ledger entry
-
-    if payment.invoice_id:
-        invoice = await db.invoices.find_one({"id": payment.invoice_id})
-        if invoice:
-            outstanding = round(invoice["total"] - invoice.get("paid_amount", 0), 2)
-            apply_amt = round(min(payment.amount, outstanding), 2)
-            if apply_amt > 0:
-                # Atomic update: $inc with a paid-ceiling filter so two
-                # concurrent payments cannot both allocate the same amount.
-                inv_result = await db.invoices.update_one(
-                    {
-                        "id": payment.invoice_id,
-                        "paid_amount": {"$lte": round(invoice["total"] - apply_amt, 2)},
-                    },
-                    {"$inc": {"paid_amount": apply_amt}}
-                )
-
-                if inv_result.modified_count == 0:
-                    # Lost the race. Re-read and recompute outstanding.
-                    fresh = await db.invoices.find_one({"id": payment.invoice_id})
-                    if fresh:
-                        outstanding = round(fresh["total"] - fresh.get("paid_amount", 0), 2)
-                        apply_amt = round(min(payment.amount, max(outstanding, 0)), 2)
-                        if apply_amt > 0:
-                            inv_result = await db.invoices.update_one(
-                                {
-                                    "id": payment.invoice_id,
-                                    "paid_amount": {"$lte": round(fresh["total"] - apply_amt, 2)},
-                                },
-                                {"$inc": {"paid_amount": apply_amt}}
-                            )
-
-                if inv_result.modified_count > 0:
-                    # Reconcile status from the now-current paid_amount.
-                    updated = await db.invoices.find_one(
-                        {"id": payment.invoice_id},
-                        {"_id": 0, "total": 1, "paid_amount": 1},
-                    )
-                    if updated:
-                        new_status = (
-                            "paid"
-                            if updated["paid_amount"] >= updated["total"]
-                            else "partially_paid"
-                        )
-                        await db.invoices.update_one(
-                            {"id": payment.invoice_id},
-                            {"$set": {"status": new_status}},
-                        )
-
-                    await db.payment_allocations.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "payment_id": payment_id,
-                        "invoice_id": payment.invoice_id,
-                        "amount": apply_amt,
-                        "created_at": datetime.now(timezone.utc).isoformat()
-                    })
-
-                    applied_to_invoices = apply_amt
-                    excess = round(payment.amount - apply_amt, 2)
-                else:
-                    # Invoice was concurrently fully paid by another request.
-                    excess = payment.amount
-            else:
-                # Invoice already fully paid — full cash amount becomes excess/CN
-                excess = payment.amount
-        else:
-            # Invoice not found — treat all as excess (Advance Payment)
-            excess = payment.amount
-            applied_to_invoices = 0
-    else:
-        # No specific invoice — apply FIFO across outstanding invoices
-        excess = await apply_payment_fifo(payment.customer_id, payment.amount, payment_id)
-        applied_to_invoices = payment.amount - excess
-
-    # Credit only the amount applied to invoices to the customer ledger.
-    # The excess sits separately as an advance_payment doc — keeping it out
-    # of the ledger here is what prevents double-counting between the ledger
-    # credit and the advance/CN balance.
-    await create_ledger_entry(
-        account=f"customer:{payment.customer_id}",
-        debit=0,
-        credit=applied_to_invoices,
-        narration="Payment applied to invoices",
-        ref_type="payment",
-        ref_id=payment_id,
-        date=payment_date
-    )
-
-    # Step 3: Create Advance Payment for overpayment instead of Credit Note
-    advance_payment_id = None
-    if excess > 0.009:  # avoid floating point noise
-        adv_id = str(uuid.uuid4())
-
-        adv_doc = {
-            "id": adv_id,
-            "customer_id": payment.customer_id,
-            "customer_name": customer["name"],
-            "payment_id": payment_id,
-            "source_invoice_id": payment.invoice_id,
-            "amount": excess,
-            "remaining_amount": excess,
-            "date": payment_date,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        advance_payment_id = adv_id
-
-        # Insert advance doc + post the customer-ledger credit in parallel.
-        # Different collections, no inter-dependency. Ref_type=payment on
-        # the ledger entry so it rolls back with the parent payment delete.
-        await asyncio.gather(
-            db.advance_payments.insert_one(adv_doc),
-            create_ledger_entry(
-                account=f"customer:{payment.customer_id}",
-                debit=0,
-                credit=excess,
-                narration=f"Advance payment received via payment ...{payment_id[-8:]}",
+            await create_ledger_entry(
+                account=payment.mode,
+                debit=payment.amount,
+                credit=0,
+                narration=f"Payment from {customer['name']}",
                 ref_type="payment",
                 ref_id=payment_id,
                 date=payment_date,
-            ),
-        )
+                session=session,
+            )
+
+            excess = 0
+            credit_note_applied_amount = 0
+
+            # Step 1: Apply any existing Credit Note to the invoice FIRST
+            if payment.credit_note_id and payment.invoice_id:
+                credit_note_applied_amount = await apply_credit_note_to_invoice(
+                    payment.credit_note_id, payment.invoice_id, session=session,
+                )
+
+            advance_applied_amount = 0
+            if payment.advance_payment_id and payment.invoice_id:
+                advance_applied_amount = await apply_advance_payment_to_invoice(
+                    payment.advance_payment_id, payment.invoice_id, session=session,
+                )
+
+            # Step 2: Determine how much cash actually needs to go to invoices
+            applied_to_invoices = 0
+
+            if payment.invoice_id:
+                invoice = await db.invoices.find_one({"id": payment.invoice_id}, session=session)
+                if invoice:
+                    outstanding = round(invoice["total"] - invoice.get("paid_amount", 0), 2)
+                    apply_amt = round(min(payment.amount, outstanding), 2)
+                    if apply_amt > 0:
+                        # Atomic update: $inc with a paid-ceiling filter so two
+                        # concurrent payments cannot both allocate the same amount.
+                        inv_result = await db.invoices.update_one(
+                            {
+                                "id": payment.invoice_id,
+                                "paid_amount": {"$lte": round(invoice["total"] - apply_amt, 2)},
+                            },
+                            {"$inc": {"paid_amount": apply_amt}},
+                            session=session,
+                        )
+
+                        if inv_result.modified_count == 0:
+                            # Lost the race. Re-read and recompute outstanding.
+                            fresh = await db.invoices.find_one({"id": payment.invoice_id}, session=session)
+                            if fresh:
+                                outstanding = round(fresh["total"] - fresh.get("paid_amount", 0), 2)
+                                apply_amt = round(min(payment.amount, max(outstanding, 0)), 2)
+                                if apply_amt > 0:
+                                    inv_result = await db.invoices.update_one(
+                                        {
+                                            "id": payment.invoice_id,
+                                            "paid_amount": {"$lte": round(fresh["total"] - apply_amt, 2)},
+                                        },
+                                        {"$inc": {"paid_amount": apply_amt}},
+                                        session=session,
+                                    )
+
+                        if inv_result.modified_count > 0:
+                            updated = await db.invoices.find_one(
+                                {"id": payment.invoice_id},
+                                {"_id": 0, "total": 1, "paid_amount": 1},
+                                session=session,
+                            )
+                            if updated:
+                                new_status = (
+                                    "paid"
+                                    if updated["paid_amount"] >= updated["total"]
+                                    else "partially_paid"
+                                )
+                                await db.invoices.update_one(
+                                    {"id": payment.invoice_id},
+                                    {"$set": {"status": new_status}},
+                                    session=session,
+                                )
+
+                            await db.payment_allocations.insert_one({
+                                "id": str(uuid.uuid4()),
+                                "payment_id": payment_id,
+                                "invoice_id": payment.invoice_id,
+                                "amount": apply_amt,
+                                "created_at": datetime.now(timezone.utc).isoformat()
+                            }, session=session)
+
+                            applied_to_invoices = apply_amt
+                            excess = round(payment.amount - apply_amt, 2)
+                        else:
+                            excess = payment.amount
+                    else:
+                        excess = payment.amount
+                else:
+                    excess = payment.amount
+                    applied_to_invoices = 0
+            else:
+                excess = await apply_payment_fifo(
+                    payment.customer_id, payment.amount, payment_id, session=session,
+                )
+                applied_to_invoices = payment.amount - excess
+
+            await create_ledger_entry(
+                account=f"customer:{payment.customer_id}",
+                debit=0,
+                credit=applied_to_invoices,
+                narration="Payment applied to invoices",
+                ref_type="payment",
+                ref_id=payment_id,
+                date=payment_date,
+                session=session,
+            )
+
+            # Step 3: Create Advance Payment for any overpayment
+            advance_payment_id = None
+            if excess > 0.009:
+                adv_id = str(uuid.uuid4())
+                adv_doc = {
+                    "id": adv_id,
+                    "customer_id": payment.customer_id,
+                    "customer_name": customer["name"],
+                    "payment_id": payment_id,
+                    "source_invoice_id": payment.invoice_id,
+                    "amount": excess,
+                    "remaining_amount": excess,
+                    "date": payment_date,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                advance_payment_id = adv_id
+
+                # Inside a transaction, all ops on the same session are
+                # serial — gather would not parallelize them. Run sequential.
+                await db.advance_payments.insert_one(adv_doc, session=session)
+                await create_ledger_entry(
+                    account=f"customer:{payment.customer_id}",
+                    debit=0,
+                    credit=excess,
+                    narration=f"Advance payment received via payment ...{payment_id[-8:]}",
+                    ref_type="payment",
+                    ref_id=payment_id,
+                    date=payment_date,
+                    session=session,
+                )
 
     return {
         "message": "Payment recorded",
