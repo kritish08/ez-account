@@ -5,10 +5,14 @@ Integrates GPT-5.2 with function calling for the voice assistant.
 Handles audio transcription, intent recognition, and natural response generation.
 """
 
+import asyncio
+import io
 import json
-from typing import Dict, Any, List, Optional
-from openai import OpenAI
 import os
+from typing import Dict, Any, List, Optional
+
+from openai import OpenAI
+
 from .voice_session import VoiceSession
 from .function_executor import FunctionExecutor
 
@@ -323,30 +327,76 @@ class VoiceAIHandler:
         endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         api_key = os.getenv("AZURE_OPENAI_KEY")
         deployment = os.getenv("DEPLOYMENT_NAME_GPT52", "gpt-5.2")
-        
+        # Separate Whisper deployment for STT. Falls back to the GPT-5.2
+        # deployment name only as a last resort — Azure will 404 if the
+        # named deployment isn't actually a Whisper model.
+        self.whisper_deployment = os.getenv("DEPLOYMENT_NAME_WHISPER", "whisper")
+
         if not endpoint or not api_key:
             raise ValueError("Azure OpenAI credentials missing in .env")
-        
+
         # Use standard OpenAI client (as per working ref files)
         self.client = OpenAI(
             base_url=endpoint,
             api_key=api_key
         )
         self.deployment = deployment
-    
-    async def transcribe_audio(self, audio_bytes: bytes) -> str:
+
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        mime_type: str = "audio/webm",
+    ) -> str:
         """
-        Transcribe audio to text using GPT-5.2 native audio.
-        
+        Transcribe audio to text via Azure OpenAI Whisper.
+
         Args:
-            audio_bytes: Audio data (various formats supported)
-        
+            audio_bytes: Raw audio payload (webm/opus from MediaRecorder,
+                or any format Whisper accepts: mp3, mp4, m4a, wav, ogg…).
+            mime_type: MIME hint; only used to pick a filename extension
+                so Whisper sniffs the format correctly.
+
         Returns:
-            Transcribed text
+            Transcribed text. Empty string when audio is empty or the
+            model produces no text — caller decides how to surface that.
+
+        Raises:
+            Propagates the underlying openai exception when the API call
+            itself fails (auth/network/quota). The WS handler converts
+            these to a `transcription_failed` frame so the UI can react.
         """
-        # TODO: GPT-5.2 supports native audio transcription
-        # For now, return placeholder (will implement with actual audio streaming)
-        return "[Audio transcription placeholder]"
+        if not audio_bytes:
+            return ""
+
+        # Whisper sniffs by filename extension. Keep this aligned with
+        # what the frontend MediaRecorder produces (default webm/opus on
+        # Chrome/Edge; Safari can emit mp4 — both are accepted).
+        ext = "webm"
+        if mime_type:
+            if "mp4" in mime_type or "m4a" in mime_type:
+                ext = "m4a"
+            elif "ogg" in mime_type:
+                ext = "ogg"
+            elif "wav" in mime_type:
+                ext = "wav"
+            elif "mpeg" in mime_type or "mp3" in mime_type:
+                ext = "mp3"
+
+        # The openai SDK call is synchronous; run it on a thread so the
+        # event loop keeps serving other WS frames during the upload.
+        def _call() -> str:
+            buf = io.BytesIO(audio_bytes)
+            buf.name = f"voice.{ext}"
+            resp = self.client.audio.transcriptions.create(
+                model=self.whisper_deployment,
+                file=buf,
+            )
+            # openai v1 returns a pydantic object with `.text`; some
+            # Azure response shapes are plain strings — handle both.
+            return getattr(resp, "text", None) or (resp if isinstance(resp, str) else "")
+
+        text = await asyncio.to_thread(_call)
+        return (text or "").strip()
     
     async def process_message(
         self,

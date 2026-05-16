@@ -8,19 +8,28 @@ future surface without duplicating subtle guards.
 
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
+
+from motor.motor_asyncio import AsyncIOMotorClientSession
 
 from app.database import db
 from app.services.ledger import create_ledger_entry, get_account_balance
 from app.services.money import _money
 
 
-async def apply_payment_fifo(customer_id: str, amount: float, payment_id: str):
+async def apply_payment_fifo(
+    customer_id: str,
+    amount: float,
+    payment_id: str,
+    session: Optional[AsyncIOMotorClientSession] = None,
+):
     """Apply a payment to the customer's oldest unpaid invoices first (FIFO)."""
     remaining = amount
 
     invoices = await db.invoices.find(
         {"customer_id": customer_id, "status": {"$nin": ["paid", "draft"]}},
         {"_id": 0},
+        session=session,
     ).sort("date", 1).to_list(None)
 
     for invoice in invoices:
@@ -38,6 +47,7 @@ async def apply_payment_fifo(customer_id: str, amount: float, payment_id: str):
         await db.invoices.update_one(
             {"id": invoice["id"]},
             {"$set": {"paid_amount": new_paid, "status": new_status}},
+            session=session,
         )
 
         await db.payment_allocations.insert_one({
@@ -46,7 +56,7 @@ async def apply_payment_fifo(customer_id: str, amount: float, payment_id: str):
             "invoice_id": invoice["id"],
             "amount": apply_amount,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }, session=session)
 
         remaining -= apply_amount
 
@@ -132,18 +142,22 @@ async def apply_credit_to_invoice(customer_id: str, invoice_id: str, invoice_tot
     return amount_due, credit_applied
 
 
-async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> float:
+async def apply_credit_note_to_invoice(
+    credit_note_id: str,
+    invoice_id: str,
+    session: Optional[AsyncIOMotorClientSession] = None,
+) -> float:
     """Atomic credit-note application — guards against double-spend (FIN-P0-1).
 
     Decrements CN balance + increments invoice paid_amount using guarded
     `$inc`s. If either side races, the CN side is rolled back so books stay
     balanced. Posts the customer-ledger relief entry (CN-LEDGER fix).
     """
-    cn = await db.credit_notes.find_one({"id": credit_note_id})
+    cn = await db.credit_notes.find_one({"id": credit_note_id}, session=session)
     if not cn or cn["total"] <= 0:
         return 0
 
-    invoice = await db.invoices.find_one({"id": invoice_id})
+    invoice = await db.invoices.find_one({"id": invoice_id}, session=session)
     if not invoice:
         return 0
 
@@ -157,6 +171,7 @@ async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> 
     cn_result = await db.credit_notes.update_one(
         {"id": credit_note_id, "total": {"$gte": apply_amount}},
         {"$inc": {"total": -apply_amount}},
+        session=session,
     )
     if cn_result.modified_count == 0:
         return 0  # raced — another request consumed it
@@ -168,12 +183,14 @@ async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> 
             "paid_amount": {"$lte": round(invoice["total"] - apply_amount, 2)},
         },
         {"$inc": {"paid_amount": apply_amount, "credit_note_applied": apply_amount}},
+        session=session,
     )
     if inv_result.modified_count == 0:
         # Roll back the CN side so books stay balanced.
         await db.credit_notes.update_one(
             {"id": credit_note_id},
             {"$inc": {"total": apply_amount}},
+            session=session,
         )
         return 0
 
@@ -181,10 +198,15 @@ async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> 
     updated_inv = await db.invoices.find_one(
         {"id": invoice_id},
         {"_id": 0, "total": 1, "paid_amount": 1, "customer_id": 1, "invoice_number": 1, "date": 1},
+        session=session,
     )
     if updated_inv:
         new_status = "paid" if updated_inv["paid_amount"] >= updated_inv["total"] else "partially_paid"
-        await db.invoices.update_one({"id": invoice_id}, {"$set": {"status": new_status}})
+        await db.invoices.update_one(
+            {"id": invoice_id},
+            {"$set": {"status": new_status}},
+            session=session,
+        )
 
         # Customer-ledger relief: the CN itself didn't post a customer entry
         # when first created (only on application), so without this the
@@ -198,12 +220,17 @@ async def apply_credit_note_to_invoice(credit_note_id: str, invoice_id: str) -> 
                 ref_type="credit_note_application",
                 ref_id=credit_note_id,
                 date=updated_inv.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                session=session,
             )
 
     return apply_amount
 
 
-async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: str) -> float:
+async def apply_advance_payment_to_invoice(
+    advance_payment_id: str,
+    invoice_id: str,
+    session: Optional[AsyncIOMotorClientSession] = None,
+) -> float:
     """Apply an Advance Payment to an invoice — atomic, double-spend-safe.
 
     Mirrors the apply_credit_note_to_invoice guard pattern (FIN-P0-1):
@@ -212,11 +239,11 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
     invoice's paid_amount with a ceiling filter so the invoice can't be
     over-paid. On either side losing the race the other side is rolled back.
     """
-    adv = await db.advance_payments.find_one({"id": advance_payment_id})
+    adv = await db.advance_payments.find_one({"id": advance_payment_id}, session=session)
     if not adv or adv.get("remaining_amount", 0) <= 0:
         return 0
 
-    invoice = await db.invoices.find_one({"id": invoice_id})
+    invoice = await db.invoices.find_one({"id": invoice_id}, session=session)
     if not invoice:
         return 0
 
@@ -233,6 +260,7 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
     adv_result = await db.advance_payments.update_one(
         {"id": advance_payment_id, "remaining_amount": {"$gte": apply_amount}},
         {"$inc": {"remaining_amount": -apply_amount}},
+        session=session,
     )
     if adv_result.modified_count == 0:
         return 0  # raced — another caller drained the advance
@@ -248,12 +276,14 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
             "paid_amount": apply_amount,
             "advance_payment_applied": apply_amount,
         }},
+        session=session,
     )
     if inv_result.modified_count == 0:
         # Roll back the advance side so books stay balanced.
         await db.advance_payments.update_one(
             {"id": advance_payment_id},
             {"$inc": {"remaining_amount": apply_amount}},
+            session=session,
         )
         return 0
 
@@ -261,10 +291,15 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
     updated_inv = await db.invoices.find_one(
         {"id": invoice_id},
         {"_id": 0, "total": 1, "paid_amount": 1},
+        session=session,
     )
     if updated_inv:
         new_status = "paid" if updated_inv["paid_amount"] >= updated_inv["total"] else "partially_paid"
-        await db.invoices.update_one({"id": invoice_id}, {"$set": {"status": new_status}})
+        await db.invoices.update_one(
+            {"id": invoice_id},
+            {"$set": {"status": new_status}},
+            session=session,
+        )
 
     # Link the original payment to this invoice for rollback support
     # (delete_payment walks this collection to revert applications).
@@ -274,7 +309,7 @@ async def apply_advance_payment_to_invoice(advance_payment_id: str, invoice_id: 
         "invoice_id": invoice_id,
         "amount": apply_amount,
         "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }, session=session)
 
     # No customer-ledger entry needed — the customer was already credited
     # when the Advance Payment was first received as cash.
