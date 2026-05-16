@@ -13,7 +13,7 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClientSession
 
 from app.database import db
-from app.services.ledger import create_ledger_entry, get_account_balance
+from app.services.ledger import get_account_balance
 from app.services.money import _money
 
 
@@ -195,9 +195,15 @@ async def apply_credit_note_to_invoice(
         return 0
 
     # Reconcile status from the now-current paid_amount.
+    # No customer-ledger entry here — `create_credit_note` already posted
+    # the customer credit + sales_returns debit at the moment the CN was
+    # issued. Application is an internal allocation (which specific
+    # invoice the customer's credit reduces), not a fresh journal event.
+    # Double-posting here was the silent "customer balance drifts by CN
+    # amount on every applied CN" bug.
     updated_inv = await db.invoices.find_one(
         {"id": invoice_id},
-        {"_id": 0, "total": 1, "paid_amount": 1, "customer_id": 1, "invoice_number": 1, "date": 1},
+        {"_id": 0, "total": 1, "paid_amount": 1},
         session=session,
     )
     if updated_inv:
@@ -207,21 +213,6 @@ async def apply_credit_note_to_invoice(
             {"$set": {"status": new_status}},
             session=session,
         )
-
-        # Customer-ledger relief: the CN itself didn't post a customer entry
-        # when first created (only on application), so without this the
-        # outstanding balance stays stale.
-        if updated_inv.get("customer_id"):
-            await create_ledger_entry(
-                account=f"customer:{updated_inv['customer_id']}",
-                debit=0,
-                credit=apply_amount,
-                narration=f"Credit Note applied to Invoice {updated_inv.get('invoice_number', invoice_id)}",
-                ref_type="credit_note_application",
-                ref_id=credit_note_id,
-                date=updated_inv.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                session=session,
-            )
 
     return apply_amount
 

@@ -213,13 +213,13 @@ async def delete_credit_note(cn_id: str, current_user: dict = Depends(get_curren
                     {"$set": {"paid_amount": new_paid, "status": new_status, "credit_note_applied": 0}}
                 )
 
-    # Independent collections / ref_types — gather to overlap round-trips.
-    # The credit_note_application ledger relief was posted when the CN was
-    # applied to any invoice (see apply_credit_note_to_invoice).
+    # Independent collections — gather to overlap round-trips.
+    # We only reverse the on-create ledger pair (ref_type="credit_note");
+    # CN application no longer posts a separate ledger entry, so there's
+    # nothing under ref_type="credit_note_application" to clean up.
     await asyncio.gather(
         delete_stock_movements("credit_note", cn_id),
         delete_ledger_entries("credit_note", cn_id),
-        delete_ledger_entries("credit_note_application", cn_id),
     )
     await db.credit_notes.delete_one({"id": cn_id})
 
