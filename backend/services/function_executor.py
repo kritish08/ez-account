@@ -1,7 +1,7 @@
 """
 Function Executor for Voice Assistant
 
-Executes grounded functions based on GPT-5.2 function calls.
+Executes grounded functions based on GPT-5.5 function calls.
 All functions are based on actual database schema and API capabilities.
 """
 
