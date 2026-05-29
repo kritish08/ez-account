@@ -133,8 +133,15 @@ async def parse_invoice_image(file: UploadFile):
         if not client:
             raise HTTPException(status_code=500, detail="AI service not configured. Check server logs.")
 
-        # Use the deployment name from environment variables, defaulting to "gpt-4o"
-        deployment_name = os.getenv("DEPLOYMENT_NAME_GPT52") or os.getenv("DEPLOYMENT_NAME_GPT4O") or "gpt-4o"
+        # Deployment name from env. Prefer the current GPT-5.5 deployment;
+        # fall back to the legacy GPT-5.2 / GPT-4o var names so an older
+        # .env keeps working, then to the known GPT-5.5 deployment id.
+        deployment_name = (
+            os.getenv("DEPLOYMENT_NAME_GPT55")
+            or os.getenv("DEPLOYMENT_NAME_GPT52")
+            or os.getenv("DEPLOYMENT_NAME_GPT4O")
+            or "gpt-5.5-one"
+        )
 
         response = client.chat.completions.create(
             model=deployment_name,

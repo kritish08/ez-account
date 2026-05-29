@@ -1,7 +1,7 @@
 """
 Voice AI Handler
 
-Integrates GPT-5.2 with function calling for the voice assistant.
+Integrates GPT-5.5 with function calling for the voice assistant.
 Handles audio transcription, intent recognition, and natural response generation.
 """
 
@@ -17,7 +17,7 @@ from .voice_session import VoiceSession
 from .function_executor import FunctionExecutor
 
 
-# GPT-5.2 Function Definitions (grounded in actual capabilities)
+# GPT-5.5 Function Definitions (grounded in actual capabilities)
 VOICE_ASSISTANT_FUNCTIONS = [
     {
         "name": "start_invoice_draft",
@@ -314,7 +314,7 @@ Always call functions when user requests actions - don't just acknowledge, actua
 
 class VoiceAIHandler:
     """
-    Handles GPT-5.2 integration for voice assistant.
+    Handles GPT-5.5 integration for voice assistant.
     
     Manages:
     - Audio transcription
@@ -326,8 +326,14 @@ class VoiceAIHandler:
         # Get OpenAI client from environment
         endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         api_key = os.getenv("AZURE_OPENAI_KEY")
-        deployment = os.getenv("DEPLOYMENT_NAME_GPT52", "gpt-5.2")
-        # Separate Whisper deployment for STT. Falls back to the GPT-5.2
+        # Prefer the current GPT-5.5 deployment; keep the legacy GPT-5.2 var
+        # name as a fallback so an older .env keeps working.
+        deployment = (
+            os.getenv("DEPLOYMENT_NAME_GPT55")
+            or os.getenv("DEPLOYMENT_NAME_GPT52")
+            or "gpt-5.5-one"
+        )
+        # Separate Whisper deployment for STT. Falls back to the GPT
         # deployment name only as a last resort — Azure will 404 if the
         # named deployment isn't actually a Whisper model.
         self.whisper_deployment = os.getenv("DEPLOYMENT_NAME_WHISPER", "whisper")
@@ -430,7 +436,7 @@ class VoiceAIHandler:
             context_msg = f"\n\nCurrent Draft Context: {json.dumps(context['draft_summary'])}"
             messages[0]["content"] += context_msg
         
-        # Convert functions to tools format for GPT-5.2
+        # Convert functions to tools format for GPT-5.5
         tools = [
             {
                 "type": "function",
@@ -439,7 +445,7 @@ class VoiceAIHandler:
             for func in VOICE_ASSISTANT_FUNCTIONS
         ]
         
-        # Call GPT-5.2 with tools (modern format)
+        # Call GPT-5.5 with tools (modern format)
         response = self.client.chat.completions.create(
             model=self.deployment,
             messages=messages,
