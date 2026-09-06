@@ -3,13 +3,16 @@
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
+from app.schemas.common import GSTIN
+
 
 class CustomerCreate(BaseModel):
     name: str
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
-    gstin: Optional[str] = None
+    gstin: GSTIN = None
+    state_code: Optional[str] = None
     # Opening balance must be non-negative — the direction (debit/credit) is
     # captured by `balance_type`. Allowing negative here led to ledger entries
     # with the wrong sign.
@@ -25,4 +28,5 @@ class CustomerUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
-    gstin: Optional[str] = None
+    gstin: GSTIN = None
+    state_code: Optional[str] = None

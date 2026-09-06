@@ -10,6 +10,10 @@ class ProductCreate(BaseModel):
     sku: Optional[str] = None
     barcode: Optional[str] = None
     hsn: Optional[str] = None
+    # GST slab for this item. Copied onto the invoice line at billing
+    # time so a later rate change doesn't retroactively alter issued
+    # invoices. Ignored entirely when the GST module is off.
+    gst_rate: float = Field(default=0, ge=0, le=100)
     unit: str = "pcs"
     category: Optional[str] = None
     item_type: str = "FINISHED_GOOD"  # RAW_MATERIAL | SEMI_FINISHED | FINISHED_GOOD | CONSUMABLE | SERVICE
@@ -32,6 +36,7 @@ class ProductUpdate(BaseModel):
     sku: Optional[str] = None
     barcode: Optional[str] = None
     hsn: Optional[str] = None
+    gst_rate: Optional[float] = Field(default=None, ge=0, le=100)
     unit: Optional[str] = None
     category: Optional[str] = None
     item_type: Optional[str] = None

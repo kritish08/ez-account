@@ -9,6 +9,9 @@ class InvoiceLineItem(BaseModel):
     description: str
     quantity: float = Field(..., gt=0)
     rate: float = Field(..., ge=0)
+    # Optional per-line override. Falls back to the product's slab when
+    # absent; ignored entirely when the GST module is off.
+    gst_rate: Optional[float] = Field(default=None, ge=0, le=100)
     batch_id: Optional[str] = None
     serial_numbers: Optional[List[str]] = None
 

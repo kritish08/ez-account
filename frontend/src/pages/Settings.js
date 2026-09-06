@@ -67,6 +67,7 @@ import {
   Smartphone,
   Pencil,
   Info,
+  Landmark,
 } from "lucide-react";
 import { Switch } from "../components/ui/switch";
 
@@ -242,7 +243,14 @@ const Settings = () => {
     setModules(newSettings);
     try {
       await updateModulesSettings(newSettings);
-      const moduleName = key === "enable_credit_notes" ? "Credit Notes" : key === "enable_debit_notes" ? "Debit Notes" : "Advanced IMS Features";
+      const MODULE_NAMES = {
+        enable_credit_notes: "Returns from customers",
+        enable_debit_notes: "Returns to suppliers",
+        enable_advanced_ims: "Advanced IMS Features",
+        enable_production: "Production Module",
+        enable_gst: "GST",
+      };
+      const moduleName = MODULE_NAMES[key] || key;
       toast.success(`${moduleName} ${checked ? "enabled" : "disabled"}`);
     } catch (error) {
       toast.error("Failed to update module settings");
@@ -521,6 +529,34 @@ const Settings = () => {
               checked={modules?.enable_production ?? false}
               onCheckedChange={(checked) => handleModuleToggle("enable_production", checked)}
               data-testid="production-module-toggle"
+            />
+          </div>
+
+          {/* GST Module Toggle */}
+          <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-emerald-100 flex items-center justify-center">
+                <Landmark className="h-4 w-4 text-emerald-600" />
+              </div>
+              <div className="space-y-0.5">
+                <Label className="text-base font-medium cursor-pointer text-emerald-900">GST</Label>
+                <p className="text-sm text-emerald-700/80">
+                  Charge CGST/SGST or IGST on invoices, show the tax breakup on
+                  the PDF, and track tax collected separately from revenue.
+                  Leave off if you are not GST-registered.
+                </p>
+                {modules?.enable_gst && (
+                  <p className="text-xs text-emerald-700/70 pt-1">
+                    Set your GSTIN in Business Setup and a GST rate on each
+                    product. Invoices already issued are not changed.
+                  </p>
+                )}
+              </div>
+            </div>
+            <Switch
+              checked={modules?.enable_gst ?? false}
+              onCheckedChange={(checked) => handleModuleToggle("enable_gst", checked)}
+              data-testid="gst-module-toggle"
             />
           </div>
 
