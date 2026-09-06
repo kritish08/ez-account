@@ -20,7 +20,19 @@ COPY . .
 ARG REACT_APP_BACKEND_URL
 ENV REACT_APP_BACKEND_URL=$REACT_APP_BACKEND_URL
 
+# Source maps were being emitted and then served by nginx, publishing the
+# full application source. They also account for a large share of build time.
+ENV GENERATE_SOURCEMAP=false
+
 RUN npm run build
+
+# Pre-compress everything nginx will serve, so `gzip_static` can hand over a
+# maximally-compressed file instead of nginx re-compressing each asset at a
+# weak level on every request.
+RUN find /app/build -type f \
+        \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' \
+           -o -name '*.json' -o -name '*.txt' \) \
+        -exec gzip -9 -k {} \;
 
 # --- Stage 2: Serve with Nginx ---
 FROM nginx:alpine
