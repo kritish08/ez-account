@@ -70,7 +70,7 @@ export const UIFilters = ({
                 )}
 
                 {/* Clear Button */}
-                <Button variant="ghost" size="icon" onClick={onClear} title="Clear Filters">
+                <Button variant="ghost" size="icon" onClick={onClear} title="Clear filters" aria-label="Clear filters">
                     <X className="h-4 w-4 text-slate-500" />
                 </Button>
             </div>

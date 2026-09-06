@@ -609,7 +609,7 @@ const Purchases = () => {
                           </div>
                         </div>
                         <div className="col-span-4 md:col-span-2 flex justify-end items-end h-[56px]">
-                          <Button type="button" variant="ghost" size="icon" onClick={() => handleRemoveItem(index)} disabled={formData.items.length === 1} className="text-slate-400 hover:text-red-600 mb-[2px]">
+                          <Button type="button" variant="ghost" size="icon" aria-label="Remove this line item" onClick={() => handleRemoveItem(index)} disabled={formData.items.length === 1} className="text-slate-400 hover:text-red-600 mb-[2px]">
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
