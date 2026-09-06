@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getBusiness, setupBusiness } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { toast } from "sonner";
-import { Loader2, Building2 } from "lucide-react";
+import { Loader2, Building2, Sparkles } from "lucide-react";
 
 const Setup = () => {
+  const location = useLocation();
+  const isFirstRun = Boolean(location.state?.firstRun);
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
@@ -86,6 +88,26 @@ const Setup = () => {
 
   return (
     <div className="max-w-2xl mx-auto animate-fade-in">
+      {/* Explain the redirect. Being dropped somewhere you didn't ask to go
+          is disorienting unless the page says why you're there and what
+          happens next. */}
+      {isFirstRun && (
+        <div className="mb-6 rounded-lg border border-brand-200 bg-brand-50 p-4">
+          <div className="flex gap-3">
+            <Sparkles className="h-5 w-5 shrink-0 text-brand-600" />
+            <div className="text-sm">
+              <p className="font-semibold text-brand-900">Let's set up your business</p>
+              <p className="mt-1 text-brand-800">
+                This takes a minute and only happens once. Your business name and
+                address go on every invoice you send, and the cash and bank
+                amounts you enter here are your starting balances — get these
+                right and your reports will be right from day one.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mb-8">
         <h1 className="text-2xl font-bold font-heading text-slate-900">Business Setup</h1>
         <p className="text-slate-500 mt-1">Configure your business details</p>
