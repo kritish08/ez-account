@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import db
 from app.deps import get_current_user
-from app.schemas.product import ProductCreate
+from app.schemas.product import ProductCreate, ProductUpdate
 from app.services.stock import create_stock_movement, get_all_product_stock, get_product_stock
 
 router = APIRouter(prefix="/api", tags=["products"])
@@ -100,13 +100,20 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
 
 
 @router.put("/products/{product_id}")
-async def update_product(product_id: str, product: ProductCreate, current_user: dict = Depends(get_current_user)):
+async def update_product(product_id: str, product: ProductUpdate, current_user: dict = Depends(get_current_user)):
     existing = await db.products.find_one({"id": product_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    update_data = product.model_dump()
-    del update_data["opening_stock"]
+    # ProductUpdate is all-Optional and we exclude_unset, so a partial body
+    # only touches the fields the client actually sent. Typing this as
+    # ProductCreate + a full model_dump() meant any partial edit reset
+    # cost_price to 0 (its default), which zeroed COGS on every later sale
+    # of that SKU and wiped its inventory valuation. `opening_stock` is
+    # deliberately absent from ProductUpdate — it's a create-time figure.
+    update_data = product.model_dump(exclude_unset=True)
+    if not update_data:
+        return {"message": "Product updated"}
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     await db.products.update_one({"id": product_id}, {"$set": update_data})
