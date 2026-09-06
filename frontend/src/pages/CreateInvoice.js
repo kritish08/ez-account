@@ -417,9 +417,14 @@ const CreateInvoice = () => {
 
   return (
     <div className="max-w-3xl mx-auto animate-fade-in" data-testid="create-invoice-page">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4 mb-8">
-        <div className="flex items-center gap-4">
+      {/* Header.
+          `flex-wrap` matters at 375px: un-hiding the camera button put two
+          whitespace-nowrap buttons (270px together) next to the back arrow and
+          title on a justify-between row, which pushed the page 66px wider than
+          the viewport. Wrapping drops the button group onto its own line
+          instead of overflowing. */}
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
+        <div className="flex min-w-0 items-center gap-4">
           <Button variant="ghost" size="icon" aria-label="Back to invoices" onClick={() => navigate("/invoices")}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
