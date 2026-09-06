@@ -52,6 +52,18 @@ const Layout = () => {
     return true;
   });
 
+  // The mobile drawer is a hand-rolled fixed panel rather than a Radix
+  // primitive, so it gets none of the usual scroll locking for free: opening
+  // it left the page behind scrolling under your finger.
+  React.useEffect(() => {
+    if (!sidebarOpen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [sidebarOpen]);
+
   const handleLogout = async () => {
     // Await so the server-side revocation lands before we navigate away —
     // otherwise an unmount can cancel the request and leave the token live.
@@ -60,7 +72,7 @@ const Layout = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen-dvh bg-slate-50">
       {/* Mobile sidebar backdrop */}
       {sidebarOpen && (
         <div
@@ -176,7 +188,7 @@ const Layout = () => {
         </header>
 
         {/* Page content */}
-        <main className="p-4 lg:p-8">
+        <main className="p-4 lg:p-8 pb-28 lg:pb-8 pb-safe">
           <Outlet />
         </main>
       </div>

@@ -128,3 +128,110 @@
         display: contents !important;
     }
 }
+
+/* ============================================================
+   Mobile / touch
+   ------------------------------------------------------------
+   This app is built desktop-first but most of its users are on a
+   phone. These rules are the baseline that makes the existing UI
+   usable there; per-page layout work is separate.
+   ============================================================ */
+
+@layer base {
+    html {
+        /* Stops iOS/Android inflating text in landscape, which broke
+           carefully-sized table and card layouts. */
+        -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+        /* Rubber-band scrolling at the page edges was chaining to the
+           document and, in a standalone PWA, showing the overscroll
+           gutter. Contain it. */
+        overscroll-behavior-y: contain;
+        /* Android draws a grey flash on every tap of a row or card.
+           Components provide their own :active states. */
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Respect the notch and the home indicator. No-ops on a desktop
+       browser, where the insets resolve to 0. */
+    body {
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+    }
+}
+
+@layer utilities {
+    /* Full-height surfaces sized against the *visible* viewport. `100vh`
+       on mobile is the tallest the viewport ever gets, so a 100vh element
+       sits partly under the URL bar until the user scrolls. */
+    .min-h-screen-dvh {
+        min-height: 100vh; /* fallback for browsers without dvh */
+        min-height: 100dvh;
+    }
+
+    /* Bottom padding that clears the home indicator, for sticky bars. */
+    .pb-safe {
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+}
+
+/* Touch targets.
+   The design system ships shadcn's compact desktop sizing: default
+   buttons are 36px, `sm` is 32px, icon buttons 36x36, inputs 36px. The
+   platform guidance on both iOS and Android is ~44px, and the per-row
+   action menus in the tables were 32x32. Rather than re-sizing every
+   call site, raise the floor on coarse pointers only — a mouse keeps
+   the compact desktop density. */
+@media (pointer: coarse) {
+    button:not([data-no-touch-target]),
+    [role="button"]:not([data-no-touch-target]),
+    a[role="menuitem"],
+    [role="menuitem"],
+    [role="option"],
+    select,
+    summary {
+        min-height: 44px;
+    }
+
+    /* Navigation links. The sidebar's NavLinks render as plain <a> with
+       py-2.5, which lands at 40px — close enough to look fine and just
+       small enough to mis-tap on a moving bus. */
+    nav a,
+    aside a {
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+    }
+
+    /* Icon-only controls need width as well as height. */
+    button.h-8.w-8,
+    button.h-9.w-9,
+    button.h-7.w-7 {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    input:not([type="checkbox"]):not([type="radio"]),
+    textarea,
+    [role="combobox"] {
+        min-height: 44px;
+    }
+
+    /* Checkboxes and radios stay visually small but get a larger hit
+       area via their label pairing; forcing 44px here would blow up the
+       control itself. */
+    input[type="checkbox"],
+    input[type="radio"] {
+        min-height: auto;
+    }
+}
+
+/* Momentum scrolling inside any horizontally-scrolling container (the
+   table wrappers, chiefly) rather than the abrupt default. */
+.overflow-auto,
+.overflow-x-auto,
+.overflow-y-auto {
+    -webkit-overflow-scrolling: touch;
+}
