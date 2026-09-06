@@ -40,14 +40,41 @@ from app.schemas.webauthn import (
 )
 from app.services.auth import _DUMMY_PASSWORD_HASH, create_access_token, verify_password
 from app.services.passkey import _b64url_to_bytes, _rebuild_attested_credentials, fido_server
+from app.services.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
+# Password login had no lockout at all: the ~80ms bcrypt cost was the only
+# brake on credential stuffing, and that parallelises trivially. Ten failures
+# in fifteen minutes per email is well clear of human fat-fingering while
+# making online guessing useless.
+LOGIN_MAX_ATTEMPTS = 10
+LOGIN_WINDOW_SECONDS = 15 * 60
+login_limiter = RateLimiter(
+    max_attempts=LOGIN_MAX_ATTEMPTS, window_seconds=LOGIN_WINDOW_SECONDS
+)
+
 
 @router.post("/auth/login", response_model=Token)
 async def login(user: UserLogin):
+    # Key on the submitted email, whether or not it exists. Throttling only
+    # real accounts would turn the 429 into an email-enumeration oracle and
+    # undo the constant-time work below.
+    throttle_key = (user.email or "").strip().lower()
+
+    retry_after = login_limiter.retry_after(throttle_key)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many failed sign-in attempts. "
+                f"Please retry in {retry_after // 60}m {retry_after % 60}s."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
+
     db_user = await db.users.find_one({"email": user.email}, {"_id": 0})
     # Always run verify_password (against the user's hash if present, or a
     # constant dummy hash if not) so the unknown-email branch takes the same
@@ -56,8 +83,12 @@ async def login(user: UserLogin):
     stored_hash = db_user["password_hash"] if db_user else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(user.password, stored_hash)
     if not db_user or not password_ok:
+        login_limiter.record(throttle_key)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    # Clear on success so an occasional typo never leaves a legitimate user
+    # one mistake away from a lockout.
+    login_limiter.reset(throttle_key)
     access_token = create_access_token(data={"sub": db_user["id"]})
     return {"access_token": access_token, "token_type": "bearer"}
 
