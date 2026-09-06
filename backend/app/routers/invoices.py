@@ -24,6 +24,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pymongo import ReturnDocument
 
 from app.database import db
 from app.deps import get_current_user
@@ -336,79 +337,101 @@ async def update_invoice(invoice_id: str, invoice_update: InvoiceUpdate, current
 @router.post("/invoices/{invoice_id}/publish")
 async def publish_invoice(invoice_id: str, apply_credit: bool = False, current_user: dict = Depends(get_current_user)):
     """Publish a draft invoice."""
-    invoice = await db.invoices.find_one({"id": invoice_id}, {"_id": 0})
+    # Atomically claim the draft before doing any book-keeping. Reading the
+    # invoice, checking `status != draft`, and only flipping the status
+    # AFTER the ledger and stock writes left a window several awaits wide:
+    # a double-click (or a client retry) let both requests past the guard
+    # and posted revenue and stock twice, with no error shown to the user.
+    # Same pattern as production.py's PLANNED -> IN_PROGRESS claim.
+    invoice = await db.invoices.find_one_and_update(
+        {"id": invoice_id, "status": "draft"},
+        {"$set": {"status": "publishing"}},
+        projection={"_id": 0},
+        return_document=ReturnDocument.BEFORE,
+    )
     if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-
-    if invoice["status"] != "draft":
+        existing = await db.invoices.find_one({"id": invoice_id}, {"_id": 0, "status": 1})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Invoice not found")
         raise HTTPException(status_code=400, detail="Invoice is not a draft")
 
     invoice_date = invoice["date"]
 
-    # Customer-AR debit + sales credit — gather.
-    await asyncio.gather(
-        create_ledger_entry(
-            account=f"customer:{invoice['customer_id']}",
-            debit=invoice["total"],
-            credit=0,
-            narration=f"Invoice {invoice['invoice_number']}",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date,
-        ),
-        create_ledger_entry(
-            account="sales",
-            debit=0,
-            credit=invoice["total"],
-            narration=f"Invoice {invoice['invoice_number']}",
-            ref_type="invoice",
-            ref_id=invoice_id,
-            date=invoice_date,
-        ),
-    )
+    try:
+        # Customer-AR debit + sales credit — gather.
+        await asyncio.gather(
+            create_ledger_entry(
+                account=f"customer:{invoice['customer_id']}",
+                debit=invoice["total"],
+                credit=0,
+                narration=f"Invoice {invoice['invoice_number']}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
+            create_ledger_entry(
+                account="sales",
+                debit=0,
+                credit=invoice["total"],
+                narration=f"Invoice {invoice['invoice_number']}",
+                ref_type="invoice",
+                ref_id=invoice_id,
+                date=invoice_date,
+            ),
+        )
 
-    # Batch product + stock lookups, then iterate. Was previously
-    # get_product_stock + find_one per item.
-    line_product_ids = list({i["product_id"] for i in invoice["items"] if i.get("product_id")})
-    name_map: dict[str, str] = {}
-    if line_product_ids:
-        async for p in db.products.find(
-            {"id": {"$in": line_product_ids}},
-            {"_id": 0, "id": 1, "name": 1},
-        ):
-            name_map[p["id"]] = p["name"]
-    stock_map = await get_all_product_stock() if line_product_ids else {}
+        # Batch product + stock lookups, then iterate. Was previously
+        # get_product_stock + find_one per item.
+        line_product_ids = list({i["product_id"] for i in invoice["items"] if i.get("product_id")})
+        name_map: dict[str, str] = {}
+        if line_product_ids:
+            async for p in db.products.find(
+                {"id": {"$in": line_product_ids}},
+                {"_id": 0, "id": 1, "name": 1},
+            ):
+                name_map[p["id"]] = p["name"]
+        stock_map = await get_all_product_stock() if line_product_ids else {}
 
-    stock_warnings = []
-    stock_ops = []
-    for item in invoice["items"]:
-        if item.get("product_id"):
-            current_stock = stock_map.get(item["product_id"], 0)
-            if current_stock < item["quantity"]:
-                stock_warnings.append({
-                    "product": name_map.get(item["product_id"], item["description"]),
-                    "current_stock": current_stock,
-                    "required": item["quantity"]
-                })
-            stock_ops.append(create_stock_movement(
-                item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
-                batch_id=item.get("batch_id"),
-                serial_numbers=item.get("serial_numbers"),
-            ))
-    if stock_ops:
-        await asyncio.gather(*stock_ops)
+        stock_warnings = []
+        stock_ops = []
+        for item in invoice["items"]:
+            if item.get("product_id"):
+                current_stock = stock_map.get(item["product_id"], 0)
+                if current_stock < item["quantity"]:
+                    stock_warnings.append({
+                        "product": name_map.get(item["product_id"], item["description"]),
+                        "current_stock": current_stock,
+                        "required": item["quantity"]
+                    })
+                stock_ops.append(create_stock_movement(
+                    item["product_id"], 0, item["quantity"], "invoice", invoice_id, invoice_date,
+                    batch_id=item.get("batch_id"),
+                    serial_numbers=item.get("serial_numbers"),
+                ))
+        if stock_ops:
+            await asyncio.gather(*stock_ops)
 
-    amount_due = invoice["total"]
-    credit_applied = 0
+        amount_due = invoice["total"]
+        credit_applied = 0
 
-    if apply_credit:
-        amount_due, credit_applied = await apply_credit_to_invoice(invoice["customer_id"], invoice_id, invoice["total"])
+        if apply_credit:
+            amount_due, credit_applied = await apply_credit_to_invoice(invoice["customer_id"], invoice_id, invoice["total"])
 
-    new_status = "paid" if amount_due <= 0 else ("partially_paid" if credit_applied > 0 else "unpaid")
-    await db.invoices.update_one(
-        {"id": invoice_id},
-        {"$set": {"status": new_status, "credit_applied": credit_applied, "paid_amount": credit_applied}}
-    )
+        new_status = "paid" if amount_due <= 0 else ("partially_paid" if credit_applied > 0 else "unpaid")
+        await db.invoices.update_one(
+            {"id": invoice_id},
+            {"$set": {"status": new_status, "credit_applied": credit_applied, "paid_amount": credit_applied}}
+        )
+    except Exception:
+        # Publishing failed part-way. Unwind whatever this attempt wrote and
+        # hand the invoice back as a draft, so the retry starts from a clean
+        # slate instead of double-posting on top of partial entries.
+        await asyncio.gather(
+            delete_ledger_entries("invoice", invoice_id),
+            delete_stock_movements("invoice", invoice_id),
+        )
+        await db.invoices.update_one({"id": invoice_id}, {"$set": {"status": "draft"}})
+        raise
 
     response = {
         "message": "Invoice published",
