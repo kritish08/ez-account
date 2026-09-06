@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pymongo import ASCENDING, DESCENDING
 
 from app import voice_state
+from app.config import CORS_ORIGINS
 from app.database import client, db
 from app.services.backup import apply_backup_schedule, scheduler
 
@@ -258,27 +259,13 @@ app.include_router(financial_router)
 app.include_router(ai_router)
 app.include_router(voice_router)
 
-# CORS — explicit origin list required when credentials are enabled.
-# Browsers reject `*` + credentials per the CORS spec, so that combo is never
-# allowed.
-_cors_origins_raw = os.environ.get("CORS_ORIGINS", "").strip()
-if _cors_origins_raw and _cors_origins_raw != "*":
-    _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_credentials=True,
-        allow_origins=_cors_origins,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    # No explicit origins configured — wildcard origins WITHOUT credentials.
-    # Lets public endpoints work in dev but blocks credentialed cross-origin
-    # requests until CORS_ORIGINS is set explicitly.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_credentials=False,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS — always an explicit origin list. config.parse_cors_origins refuses
+# to start on a missing value or a wildcard, so there is no permissive
+# fallback to drift into.
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
