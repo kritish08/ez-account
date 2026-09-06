@@ -2,9 +2,32 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#000000" />
+        <!-- viewport-fit=cover lets the page paint under the notch and home
+             indicator; index.css then pads content back with env(safe-area-*).
+             Without it those insets are always zero. -->
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+        <!-- Brand indigo, so the Android status bar and the PWA title bar
+             match the app instead of rendering black. -->
+        <meta name="theme-color" content="#4338ca" />
         <title>EZ Accounts by Kyrex</title>
+
+        <!-- Installability. public/ previously held nothing but this file:
+             no manifest, no icons, so the app could not be added to a home
+             screen at all. -->
+        <link rel="manifest" href="/manifest.json" />
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="EZ Accounts" />
+        <meta
+            name="apple-mobile-web-app-status-bar-style"
+            content="black-translucent"
+        />
+        <meta name="mobile-web-app-capable" content="yes" />
 
         <!--
           Fonts are requested here rather than through an @import at the top
