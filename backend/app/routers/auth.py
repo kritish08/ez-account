@@ -89,13 +89,69 @@ async def login(user: UserLogin):
     # Clear on success so an occasional typo never leaves a legitimate user
     # one mistake away from a lockout.
     login_limiter.reset(throttle_key)
-    access_token = create_access_token(data={"sub": db_user["id"]})
+    access_token = create_access_token(
+        data={"sub": db_user["id"], "tv": db_user.get("token_version", 0)}
+    )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
 @router.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     return {"id": current_user["id"], "email": current_user["email"], "name": current_user["name"]}
+
+
+@router.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    """Revoke the token used to make this request.
+
+    Logout was previously client-side only: the browser dropped the token
+    and the server carried on honouring it. Denylisting the jti makes
+    signing out actually mean something, while leaving the user's other
+    devices signed in.
+
+    The row carries the token's own expiry so a TTL index can sweep it —
+    the denylist never needs to outlive the tokens it denies.
+    """
+    claims = current_user.get("_token_claims") or {}
+    jti = claims.get("jti")
+    if not jti:
+        # Token predates jti support; nothing precise to revoke.
+        return {"message": "Signed out"}
+
+    expires_at = datetime.fromtimestamp(claims["exp"], tz=timezone.utc) if claims.get("exp") else (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    )
+    await db.revoked_tokens.update_one(
+        {"jti": jti},
+        {"$set": {
+            "jti": jti,
+            "user_id": current_user["id"],
+            "revoked_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at,
+        }},
+        upsert=True,
+    )
+    return {"message": "Signed out"}
+
+
+@router.post("/auth/logout-all")
+async def logout_all(current_user: dict = Depends(get_current_user)):
+    """Revoke every token ever issued to this account.
+
+    The lever to pull when a device is lost or a token is believed
+    leaked. Increments the account's token version, so every token
+    carrying an older one stops being accepted. The next login mints a
+    token at the new version and works normally.
+    """
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$inc": {"token_version": 1}},
+    )
+    logger.warning(
+        "All sessions revoked for user_id=%s email=%s",
+        current_user["id"], current_user.get("email"),
+    )
+    return {"message": "Signed out of all devices"}
 
 
 # ============== WEBAUTHN / PASSKEY AUTH ==============
@@ -296,7 +352,9 @@ async def authenticate_passkey_complete(data: WebAuthnAuthenticateComplete):
         )
         await db.webauthn_states.delete_one({"_id": state_doc["_id"]})
         logger.info(f"Passkey login successful for user {user['id']} (credential: {matched_id_b64[:20]}...)")
-        access_token = create_access_token(data={"sub": user["id"]})
+        access_token = create_access_token(
+            data={"sub": user["id"], "tv": user.get("token_version", 0)}
+        )
         return {"access_token": access_token, "token_type": "bearer"}
     except HTTPException:
         raise

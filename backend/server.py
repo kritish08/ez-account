@@ -176,6 +176,13 @@ async def lifespan(app: FastAPI):
     # registration/auth handshakes (5-min window) so abandoned flows don't
     # accumulate. Also index the lookup keys.
     await _safe_create_index("webauthn_states", "expires_at", expireAfterSeconds=0)
+
+    # Revoked-token denylist, consulted on every authenticated request, so the
+    # jti lookup must be indexed. The TTL sweep drops each row once the token
+    # it denies has expired on its own — the denylist never grows unbounded
+    # and never needs to outlive its tokens.
+    await _safe_create_index("revoked_tokens", "jti", unique=True)
+    await _safe_create_index("revoked_tokens", "expires_at", expireAfterSeconds=0)
     await _safe_create_index("webauthn_states", [("user_id", ASCENDING), ("type", ASCENDING)])
     await _safe_create_index("webauthn_states", [("email", ASCENDING), ("type", ASCENDING)])
     # Credential ids are globally unique per the WebAuthn spec, so a plain
