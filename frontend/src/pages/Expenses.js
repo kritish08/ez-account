@@ -314,7 +314,8 @@ const Expenses = () => {
                     size="sm"
                     onClick={handleCameraClick}
                     disabled={scanning}
-                    className="hidden md:flex"
+                    // Camera capture is a phone affordance; was inverted.
+                    className="flex md:hidden"
                   >
                     <ScanLine className="h-4 w-4 mr-2" />
                     Take Photo
@@ -354,7 +355,7 @@ const Expenses = () => {
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
                 <Input
                   id="amount"
-                  type="number"
+                  type="number" inputMode="decimal"
                   step="0.01"
                   min="0"
                   value={formData.amount}
