@@ -79,6 +79,9 @@ const Settings = () => {
   const [backups, setBackups] = useState([]);
   const [selectedBackup, setSelectedBackup] = useState(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
+  const [restorePassword, setRestorePassword] = useState("");
+  const [restoreConfirmation, setRestoreConfirmation] = useState("");
+  const RESTORE_PHRASE = "RESTORE AND OVERWRITE ALL DATA";
   const [s3Settings, setS3Settings] = useState({
     aws_access_key_id: "",
     aws_secret_access_key: "",
@@ -348,13 +351,22 @@ const Settings = () => {
 
   const handleRestore = async () => {
     if (!selectedBackup) return;
+    if (!restorePassword) return toast.error("Password required");
+    if (restoreConfirmation !== RESTORE_PHRASE) {
+      return toast.error(`Confirmation phrase must be exactly: ${RESTORE_PHRASE}`);
+    }
 
     setRestoring(true);
     try {
-      await restoreBackup(selectedBackup);
+      await restoreBackup(selectedBackup, {
+        password: restorePassword,
+        confirmation: restoreConfirmation,
+      });
       toast.success("Backup restored successfully!");
       setRestoreDialogOpen(false);
       setSelectedBackup(null);
+      setRestorePassword("");
+      setRestoreConfirmation("");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Restore failed");
     } finally {
@@ -774,9 +786,37 @@ const Settings = () => {
               This action cannot be undone. Make sure to create a new backup first if you want to preserve current data.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="restore-password">Confirm your password</Label>
+              <Input
+                id="restore-password"
+                type="password"
+                value={restorePassword}
+                onChange={(e) => setRestorePassword(e.target.value)}
+                placeholder="Your account password"
+                autoComplete="current-password"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="restore-confirmation">
+                Confirmation phrase — type <code className="font-mono text-xs">{RESTORE_PHRASE}</code>
+              </Label>
+              <Input
+                id="restore-confirmation"
+                value={restoreConfirmation}
+                onChange={(e) => setRestoreConfirmation(e.target.value)}
+                placeholder={RESTORE_PHRASE}
+              />
+            </div>
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleRestore} disabled={restoring} className="bg-amber-600 hover:bg-amber-700">
+            <AlertDialogAction
+              onClick={handleRestore}
+              disabled={!restorePassword || restoreConfirmation !== RESTORE_PHRASE || restoring}
+              className="bg-amber-600 hover:bg-amber-700"
+            >
               {restoring ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Restoring...</> : "Restore Backup"}
             </AlertDialogAction>
           </AlertDialogFooter>

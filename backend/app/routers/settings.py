@@ -20,7 +20,7 @@ import boto3
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_admin
 from app.schemas.settings import (
     ModulesSettings, S3Settings, SystemResetRequest, SystemSettings,
 )
@@ -198,11 +198,11 @@ _last_reset_by_user: dict = {}
 
 
 @router.post("/system/reset")
-async def reset_system(req: SystemResetRequest, current_user: dict = Depends(get_current_user)):
+async def reset_system(req: SystemResetRequest, current_user: dict = Depends(require_admin)):
     """Wipe all accounting data.
 
     Requires three independent factors:
-      1. Valid authenticated session
+      1. Valid authenticated session, with an administrator role
       2. Re-entered password
       3. Verbatim confirmation phrase
     Plus a 1-hour rate limit per user, regardless of success.
