@@ -52,8 +52,10 @@ const Layout = () => {
     return true;
   });
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    // Await so the server-side revocation lands before we navigate away —
+    // otherwise an unmount can cancel the request and leave the token live.
+    await logout();
     navigate("/login");
   };
 

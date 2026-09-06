@@ -46,6 +46,33 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if user is None:
         raise credentials_exception
+
+    # ---- Revocation ----
+    # Two levers, both checked here so every authenticated route gets them
+    # rather than just the one that remembered to ask.
+    #
+    # 1. Per-token: /auth/logout adds this token's jti to a denylist, so
+    #    signing out of one device leaves the others alone.
+    jti = payload.get("jti")
+    if jti and await db.revoked_tokens.find_one({"jti": jti}, {"_id": 1}):
+        raise credentials_exception
+
+    # 2. Per-user: /auth/logout-all increments the account's token version,
+    #    which invalidates every token carrying an older one. This is the
+    #    incident-response lever for a lost device, and it costs nothing
+    #    extra because the user document is already loaded.
+    #
+    #    A version counter rather than an "issued before" timestamp on
+    #    purpose: `iat` has one-second resolution, so a timestamp comparison
+    #    either lets through tokens minted in the same second as the revoke
+    #    or rejects the fresh login that immediately follows it. A counter
+    #    has no such window. Tokens and users predating this both read as
+    #    version 0, so existing sessions keep working.
+    if payload.get("tv", 0) != user.get("token_version", 0):
+        raise credentials_exception
+
+    # Handlers that revoke need the presenting token's own claims.
+    user["_token_claims"] = {"jti": jti, "iat": payload.get("iat"), "exp": payload.get("exp")}
     return user
 
 
