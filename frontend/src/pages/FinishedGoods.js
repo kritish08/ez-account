@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useModules } from "../context/ModulesContext";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { getProducts, createProduct, updateProduct, deleteProduct, formatCurrency } from "../lib/api";
 import BarcodeScanner from "../components/LazyBarcodeScanner";
 import { Button } from "../components/ui/button";
@@ -64,6 +71,8 @@ const FinishedGoods = () => {
     cost_price: "",
     opening_stock: "",
     low_stock_threshold: "10",
+    hsn: "",
+    gst_rate: "",
   });
 
   const [refreshKey, setRefreshKey] = useState(0);
@@ -288,6 +297,41 @@ const FinishedGoods = () => {
                   />
                 </div>
               </div>
+
+              {/* Only rendered when the GST module is on — a business that
+                  isn't registered should never be asked for a tax slab. */}
+              {modules?.enable_gst && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="hsn">HSN / SAC code</Label>
+                    <Input
+                      id="hsn"
+                      value={formData.hsn}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, hsn: e.target.value }))}
+                      placeholder="e.g. 1006"
+                      inputMode="numeric"
+                      className="font-mono"
+                      data-testid="product-hsn-input"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="gst_rate">GST rate</Label>
+                    <Select
+                      value={String(formData.gst_rate ?? "")}
+                      onValueChange={(v) => setFormData((prev) => ({ ...prev, gst_rate: v }))}
+                    >
+                      <SelectTrigger id="gst_rate" data-testid="product-gst-rate">
+                        <SelectValue placeholder="Select rate" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {["0", "0.25", "3", "5", "12", "18", "28"].map((r) => (
+                          <SelectItem key={r} value={r}>{r}%</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-4">
                 <Button type="button" variant="outline" onClick={() => { setDialogOpen(false); resetForm(); }}>

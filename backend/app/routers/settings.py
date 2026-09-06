@@ -42,6 +42,7 @@ async def get_modules_settings(current_user: dict = Depends(get_current_user)):
             "enable_debit_notes":  True,
             "enable_advanced_ims": False,
             "enable_production":   False,
+            "enable_gst":          False,
         }
     # Ensure new boolean flags have defaults if missing from DB (migration safety)
     return {
@@ -49,6 +50,9 @@ async def get_modules_settings(current_user: dict = Depends(get_current_user)):
         "enable_debit_notes":  settings.get("enable_debit_notes",  True),
         "enable_advanced_ims": settings.get("enable_advanced_ims", False),
         "enable_production":   settings.get("enable_production",   False),
+        # Absent for every business that predates the GST module — default
+        # off so enabling it stays a deliberate act.
+        "enable_gst":          settings.get("enable_gst",          False),
     }
 
 
