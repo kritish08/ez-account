@@ -157,6 +157,9 @@ const Setup = () => {
                 <Label htmlFor="gstin">GSTIN (Optional)</Label>
                 <Input
                   id="gstin"
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
                   name="gstin"
                   value={formData.gstin}
                   onChange={handleChange}
@@ -187,7 +190,7 @@ const Setup = () => {
                     <Input
                       id="opening_cash"
                       name="opening_cash"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       value={formData.opening_cash}
                       onChange={handleChange}
@@ -204,7 +207,7 @@ const Setup = () => {
                     <Input
                       id="opening_bank"
                       name="opening_bank"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       value={formData.opening_bank}
                       onChange={handleChange}

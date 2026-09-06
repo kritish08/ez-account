@@ -207,7 +207,7 @@ const Suppliers = () => {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="phone">Phone</Label>
-                <Input id="phone" value={formData.phone} onChange={(e) => setFormData((prev) => ({ ...prev, phone: e.target.value }))} placeholder="+91 98765 43210" data-testid="supplier-phone-input" />
+                <Input id="phone" type="tel" inputMode="tel" autoComplete="tel" value={formData.phone} onChange={(e) => setFormData((prev) => ({ ...prev, phone: e.target.value }))} placeholder="+91 98765 43210" data-testid="supplier-phone-input" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="address">Address</Label>
@@ -215,7 +215,7 @@ const Suppliers = () => {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="gstin">GSTIN (Optional)</Label>
-                <Input id="gstin" value={formData.gstin} onChange={(e) => setFormData((prev) => ({ ...prev, gstin: e.target.value }))} placeholder="Tax ID" data-testid="supplier-gstin-input" />
+                <Input id="gstin" autoCapitalize="characters" autoCorrect="off" spellCheck={false} value={formData.gstin} onChange={(e) => setFormData((prev) => ({ ...prev, gstin: e.target.value }))} placeholder="Tax ID" data-testid="supplier-gstin-input" />
               </div>
 
               {!editingSupplier && (
@@ -223,7 +223,7 @@ const Suppliers = () => {
                   <Label htmlFor="opening_balance">Opening Payable</Label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
-                    <Input id="opening_balance" type="number" step="0.01" min="0" value={formData.opening_balance} onChange={(e) => setFormData((prev) => ({ ...prev, opening_balance: e.target.value }))} className="pl-8 font-mono" data-testid="supplier-balance-input" />
+                    <Input id="opening_balance" type="number" inputMode="decimal" step="0.01" min="0" value={formData.opening_balance} onChange={(e) => setFormData((prev) => ({ ...prev, opening_balance: e.target.value }))} className="pl-8 font-mono" data-testid="supplier-balance-input" />
                   </div>
                 </div>
               )}
@@ -280,7 +280,7 @@ const Suppliers = () => {
               <Label htmlFor="payment_amount">Amount *</Label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
-                <Input id="payment_amount" type="number" step="0.01" min="0" value={paymentData.amount} onChange={(e) => setPaymentData((prev) => ({ ...prev, amount: e.target.value }))} className="pl-8 font-mono" data-testid="supplier-payment-amount-input" />
+                <Input id="payment_amount" type="number" inputMode="decimal" step="0.01" min="0" value={paymentData.amount} onChange={(e) => setPaymentData((prev) => ({ ...prev, amount: e.target.value }))} className="pl-8 font-mono" data-testid="supplier-payment-amount-input" />
               </div>
             </div>
             <div className="space-y-2">
