@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getInvoices, deleteInvoice, formatCurrency, formatDate } from "../lib/api";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
+import { ResponsiveList, ListCard } from "../components/ResponsiveList";
 import {
   Table,
   TableBody,
@@ -70,6 +71,20 @@ const Invoices = () => {
 
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey((k) => k + 1);
+
+  // The search filter used to run twice on every render — once to decide
+  // whether to show the table at all, once to map the rows — over the whole
+  // invoice list, on every keystroke of an undebounced input. Computed once
+  // here and reused by both the table and the mobile card list.
+  const visibleInvoices = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return invoices;
+    return invoices.filter(
+      (inv) =>
+        inv.invoice_number?.toLowerCase().includes(q) ||
+        inv.customer_name?.toLowerCase().includes(q)
+    );
+  }, [invoices, search]);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,12 +180,35 @@ const Invoices = () => {
             </div>
           </CardContent>
         </Card>
-      ) : invoices.filter((inv) => {
-        const q = search.toLowerCase();
-        return !q || inv.invoice_number?.toLowerCase().includes(q) || inv.customer_name?.toLowerCase().includes(q);
-      }).length > 0 ? (
+      ) : visibleInvoices.length > 0 ? (
         <Card>
-          <CardContent className="p-0">
+          <CardContent className="p-0 max-md:px-4">
+            <ResponsiveList
+              items={visibleInvoices}
+              renderCard={(invoice) => (
+                <ListCard
+                  primary={invoice.invoice_number}
+                  secondary={invoice.customer_name}
+                  amount={formatCurrency(invoice.total)}
+                  status={
+                    <Badge
+                      variant={statusBadgeVariant[invoice.status]}
+                      className={statusBadgeClass[invoice.status]}
+                    >
+                      {invoice.status.replace("_", " ")}
+                    </Badge>
+                  }
+                  meta={
+                    <>
+                      {formatDate(invoice.date)}
+                      {invoice.paid_amount > 0 &&
+                        ` · ${formatCurrency(invoice.paid_amount)} paid`}
+                    </>
+                  }
+                  onClick={() => navigate(`/invoices/${invoice.id}`)}
+                />
+              )}
+            >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -184,10 +222,7 @@ const Invoices = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {invoices.filter((inv) => {
-                  const q = search.toLowerCase();
-                  return !q || inv.invoice_number?.toLowerCase().includes(q) || inv.customer_name?.toLowerCase().includes(q);
-                }).map((invoice) => (
+                {visibleInvoices.map((invoice) => (
                   <TableRow
                     key={invoice.id}
                     data-testid={`invoice-row-${invoice.id}`}
@@ -240,6 +275,7 @@ const Invoices = () => {
                 ))}
               </TableBody>
             </Table>
+            </ResponsiveList>
           </CardContent>
         </Card>
       ) : (
