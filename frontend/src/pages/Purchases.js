@@ -504,7 +504,8 @@ const Purchases = () => {
                       size="sm"
                       onClick={handleCameraClick}
                       disabled={parsing} // Changed from scanning to parsing
-                      className="hidden md:flex" // Ideally visible on mobile, keeping consistent
+                      // Camera capture is a phone affordance; was inverted.
+                      className="flex md:hidden"
                     >
                       <ScanLine className="h-4 w-4 mr-2" />
                       Take Photo
@@ -598,13 +599,13 @@ const Purchases = () => {
                         </div>
                         <div className="col-span-4 md:col-span-2 space-y-1">
                           <Label className="text-xs">Qty</Label>
-                          <Input type="number" min="0" step="1" value={item.quantity} onChange={(e) => handleItemChange(index, "quantity", e.target.value)} className="font-mono" data-testid={`purchase-item-qty-${index}`} />
+                          <Input type="number" inputMode="decimal" min="0" step="1" value={item.quantity} onChange={(e) => handleItemChange(index, "quantity", e.target.value)} className="font-mono" data-testid={`purchase-item-qty-${index}`} />
                         </div>
                         <div className="col-span-4 md:col-span-3 space-y-1">
                           <Label className="text-xs">Cost Price</Label>
                           <div className="relative">
                             <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-xs">₹</span>
-                            <Input type="number" min="0" step="0.01" value={item.cost_price} onChange={(e) => handleItemChange(index, "cost_price", e.target.value)} className="pl-5 font-mono" data-testid={`purchase-item-price-${index}`} />
+                            <Input type="number" inputMode="decimal" min="0" step="0.01" value={item.cost_price} onChange={(e) => handleItemChange(index, "cost_price", e.target.value)} className="pl-5 font-mono" data-testid={`purchase-item-price-${index}`} />
                           </div>
                         </div>
                         <div className="col-span-4 md:col-span-2 flex justify-end items-end h-[56px]">
