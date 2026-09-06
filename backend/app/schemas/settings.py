@@ -46,3 +46,10 @@ class SystemSettings(BaseModel):
 class SystemResetRequest(BaseModel):
     password: str
     confirmation: str  # must equal RESET_CONFIRMATION_PHRASE (typed deliberately)
+
+
+class BackupRestoreRequest(BaseModel):
+    """Restore overwrites every collection in the archive — same blast
+    radius as a factory reset, so it takes the same two extra factors."""
+    password: str
+    confirmation: str  # must equal RESTORE_CONFIRMATION_PHRASE (typed deliberately)

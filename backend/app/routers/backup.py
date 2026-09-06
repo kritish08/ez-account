@@ -19,6 +19,7 @@ logins.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -27,8 +28,9 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import MASTER_ENCRYPTION_KEY
 from app.database import db
-from app.deps import get_current_user
-from app.schemas.settings import BackupScheduleSettings
+from app.deps import get_current_user, require_admin
+from app.schemas.settings import BackupRestoreRequest, BackupScheduleSettings
+from app.services.auth import verify_password
 from app.services.backup import apply_backup_schedule
 from app.services.crypto import decrypt_data, encrypt_data
 
@@ -171,9 +173,74 @@ async def list_backups(current_user: dict = Depends(get_current_user)):
         return {"backups": [], "error": str(e)}
 
 
+# Required confirmation phrase, mirroring the factory reset. Verbose on
+# purpose so a single stolen token or a stray click can't trigger it.
+RESTORE_CONFIRMATION_PHRASE = "RESTORE AND OVERWRITE ALL DATA"
+
+# In-memory cooldown, user_id -> last-attempt epoch. Restores are rare and
+# catastrophic when wrong; one per 10 minutes is generous.
+_restore_cooldown_seconds = 10 * 60
+_last_restore_by_user: dict = {}
+
+
 @router.post("/backup/restore/{filename}")
-async def restore_backup(filename: str, current_user: dict = Depends(get_current_user)):
-    """Restore from encrypted backup."""
+async def restore_backup(
+    filename: str,
+    req: BackupRestoreRequest,
+    current_user: dict = Depends(require_admin),
+):
+    """Restore from encrypted backup.
+
+    This deletes every document in each collection present in the archive
+    and re-inserts the archived ones — the most destructive operation in
+    the product. It previously required nothing but a valid session, so
+    any logged-in user, or anyone holding a stolen 24-hour token, could
+    roll the live books back to an arbitrary point.
+
+    Now requires the same three factors as the factory reset:
+      1. Valid authenticated session, with an administrator role
+      2. Re-entered password (which a stolen token alone cannot supply)
+      3. Verbatim confirmation phrase
+    plus a per-user cooldown that counts failures.
+
+    These checks run BEFORE any S3 or key configuration lookup, so a
+    misconfigured deployment can't mask a missing credential check.
+    """
+    user_id = current_user.get("id") or current_user.get("email")
+    now = time.time()
+    last = _last_restore_by_user.get(user_id, 0)
+    if now - last < _restore_cooldown_seconds:
+        remaining = int(_restore_cooldown_seconds - (now - last))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Restore rate-limited. Try again in {remaining // 60}m {remaining % 60}s.",
+        )
+
+    if req.confirmation != RESTORE_CONFIRMATION_PHRASE:
+        _last_restore_by_user[user_id] = now
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Confirmation phrase mismatch. To proceed, the `confirmation` "
+                f"field must be exactly: '{RESTORE_CONFIRMATION_PHRASE}'."
+            ),
+        )
+
+    user = await db.users.find_one({"email": current_user.get("email")})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    hashed = user.get("password_hash") or user.get("password")
+    if not hashed or not verify_password(req.password, hashed):
+        _last_restore_by_user[user_id] = now
+        raise HTTPException(status_code=401, detail="Incorrect password. Restore forbidden.")
+
+    logger.warning(
+        f"BACKUP RESTORE initiated by user_id={user_id} "
+        f"email={current_user.get('email')} filename={filename}"
+    )
+    _last_restore_by_user[user_id] = now
+
     if not MASTER_ENCRYPTION_KEY:
         raise HTTPException(status_code=500, detail="Master encryption key not configured")
 
