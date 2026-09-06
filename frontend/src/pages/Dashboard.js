@@ -486,7 +486,7 @@ const Dashboard = () => {
                 <AlertTriangle className="h-5 w-5 text-amber-600" />
                 Low Stock Alerts
               </CardTitle>
-              <Link to="/products">
+              <Link to="/finished-goods">
                 <Button variant="ghost" size="sm" className="text-amber-700 hover:text-amber-800 hover:bg-amber-100">
                   View inventory <ArrowRight className="h-4 w-4 ml-1" />
                 </Button>
