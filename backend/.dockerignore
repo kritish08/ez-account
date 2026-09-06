@@ -11,3 +11,16 @@ env/
 uploads/
 *.enc
 *.tar.gz
+
+# Scratch scripts and scratch data must never reach a production image.
+# `ref/` held vendor demo files with a hardcoded API key, and test_db.py
+# held a production Mongo URI — both shipped inside the image because
+# the Dockerfile does `COPY . .` and nothing here excluded them.
+ref/
+test_*.py
+verify_*.py
+reproduce_*.py
+tests/
+run_tests.sh
+pytest.ini
+*.md
