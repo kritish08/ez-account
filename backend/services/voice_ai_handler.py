@@ -5,13 +5,12 @@ Integrates GPT-5.5 with function calling for the voice assistant.
 Handles audio transcription, intent recognition, and natural response generation.
 """
 
-import asyncio
 import io
 import json
 import os
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from .voice_session import VoiceSession
 from .function_executor import FunctionExecutor
@@ -323,30 +322,27 @@ class VoiceAIHandler:
     """
     
     def __init__(self):
-        # Get OpenAI client from environment
-        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        api_key = os.getenv("AZURE_OPENAI_KEY")
-        # Prefer the current GPT-5.5 deployment; keep the legacy GPT-5.2 var
-        # name as a fallback so an older .env keeps working.
-        deployment = (
-            os.getenv("DEPLOYMENT_NAME_GPT55")
-            or os.getenv("DEPLOYMENT_NAME_GPT52")
-            or "gpt-5.5-one"
-        )
-        # Separate Whisper deployment for STT. Falls back to the GPT
-        # deployment name only as a last resort — Azure will 404 if the
-        # named deployment isn't actually a Whisper model.
-        self.whisper_deployment = os.getenv("DEPLOYMENT_NAME_WHISPER", "whisper")
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is not set — voice assistant unavailable")
 
-        if not endpoint or not api_key:
-            raise ValueError("Azure OpenAI credentials missing in .env")
+        # Chat model driving the tool-calling loop.
+        self.model = os.getenv("OPENAI_MODEL", "gpt-5.6")
+        # Speech-to-text model. gpt-4o-transcribe handles code-switched
+        # Hindi/English noticeably better than whisper-1 on short utterances.
+        self.transcribe_model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+        # ISO-639-1 hint. Shop-floor speech is Hinglish, and naming the
+        # dominant language measurably reduces spurious transliteration.
+        self.transcribe_language = os.getenv("OPENAI_TRANSCRIBE_LANGUAGE") or None
 
-        # Use standard OpenAI client (as per working ref files)
-        self.client = OpenAI(
-            base_url=endpoint,
-            api_key=api_key
+        # `base_url` is only for OpenAI-compatible gateways; unset means
+        # api.openai.com. Async client so the tool loop never blocks the
+        # event loop — the previous sync client froze the whole server for
+        # the duration of every voice turn.
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=os.getenv("OPENAI_BASE_URL") or None,
         )
-        self.deployment = deployment
 
     async def transcribe_audio(
         self,
@@ -354,7 +350,7 @@ class VoiceAIHandler:
         mime_type: str = "audio/webm",
     ) -> str:
         """
-        Transcribe audio to text via Azure OpenAI Whisper.
+        Transcribe audio to text via the OpenAI transcription API.
 
         Args:
             audio_bytes: Raw audio payload (webm/opus from MediaRecorder,
@@ -388,20 +384,15 @@ class VoiceAIHandler:
             elif "mpeg" in mime_type or "mp3" in mime_type:
                 ext = "mp3"
 
-        # The openai SDK call is synchronous; run it on a thread so the
-        # event loop keeps serving other WS frames during the upload.
-        def _call() -> str:
-            buf = io.BytesIO(audio_bytes)
-            buf.name = f"voice.{ext}"
-            resp = self.client.audio.transcriptions.create(
-                model=self.whisper_deployment,
-                file=buf,
-            )
-            # openai v1 returns a pydantic object with `.text`; some
-            # Azure response shapes are plain strings — handle both.
-            return getattr(resp, "text", None) or (resp if isinstance(resp, str) else "")
+        buf = io.BytesIO(audio_bytes)
+        buf.name = f"voice.{ext}"
 
-        text = await asyncio.to_thread(_call)
+        kwargs = {"model": self.transcribe_model, "file": buf}
+        if self.transcribe_language:
+            kwargs["language"] = self.transcribe_language
+
+        resp = await self.client.audio.transcriptions.create(**kwargs)
+        text = getattr(resp, "text", None) or (resp if isinstance(resp, str) else "")
         return (text or "").strip()
     
     async def process_message(
@@ -423,102 +414,98 @@ class VoiceAIHandler:
         """
         # Add user message to history
         session.add_message("user", message)
-        
-        # Prepare messages for GPT with context
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *session.conversation_history
-        ]
-        
-        # Add context about current state
+
+        # Responses API: the system prompt goes in `instructions`, and the
+        # turn history is the `input` list.
+        instructions = SYSTEM_PROMPT
         context = session.get_context()
         if context["has_active_draft"]:
-            context_msg = f"\n\nCurrent Draft Context: {json.dumps(context['draft_summary'])}"
-            messages[0]["content"] += context_msg
-        
-        # Convert functions to tools format for GPT-5.5
+            instructions += (
+                f"\n\nCurrent Draft Context: {json.dumps(context['draft_summary'])}"
+            )
+
+        conversation = [
+            {"role": m["role"], "content": m["content"]}
+            for m in session.conversation_history
+            if m.get("content")
+        ]
+
+        # Responses-API tool shape is flat — name/description/parameters at
+        # the top level, not nested under a "function" key.
         tools = [
             {
                 "type": "function",
-                "function": func
+                "name": func["name"],
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters", {}),
             }
             for func in VOICE_ASSISTANT_FUNCTIONS
         ]
-        
-        # Call GPT-5.5 with tools (modern format)
-        response = self.client.chat.completions.create(
-            model=self.deployment,
-            messages=messages,
+
+        response = await self.client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=conversation,
             tools=tools,
-            tool_choice="auto",  # Let GPT decide when to call tools
-            max_completion_tokens=500,
-            temperature=0.7
+            tool_choice="auto",
+            max_output_tokens=500,
         )
-        
-        message_response = response.choices[0].message
-        
-        # Check if GPT wants to call a tool
-        if message_response.tool_calls:
-            tool_call = message_response.tool_calls[0]  # Handle first tool call
-            function_name = tool_call.function.name
-            function_args = json.loads(tool_call.function.arguments)
-            
-            # Execute the function
-            function_result = await self._execute_function(
-                function_name,
-                function_args,
-                executor
+
+        # Execute EVERY function call the model asked for. Taking only
+        # `tool_calls[0]` silently dropped the rest — "add 10 notebooks and
+        # 5 pens" recorded one line item and then reported success for both.
+        calls = [item for item in response.output if item.type == "function_call"]
+
+        if calls:
+            conversation += response.output
+            executed = []
+
+            for call in calls:
+                function_args = json.loads(call.arguments)
+                function_result = await self._execute_function(
+                    call.name, function_args, executor
+                )
+                executed.append((call.name, function_result))
+                conversation.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(function_result),
+                })
+
+            # Let the model narrate what actually happened, now that it can
+            # see every tool result.
+            final_response = await self.client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=conversation,
+                max_output_tokens=300,
             )
-            
-            # Add tool call to history
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": function_name,
-                        "arguments": tool_call.function.arguments
-                    }
-                }]
-            })
-            
-            # Add tool result to history
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(function_result)
-            })
-            
-            # Get natural language response based on function result
-            final_response = self.client.chat.completions.create(
-                model=self.deployment,
-                messages=messages,
-                max_completion_tokens=300,
-                temperature=0.7
-            )
-            
-            ai_message = final_response.choices[0].message.content
+
+            ai_message = final_response.output_text
             session.add_message("assistant", ai_message)
-            
+
+            last_name, last_result = executed[-1]
             return {
                 "success": True,
                 "message": ai_message,
-                "function_called": function_name,
-                "function_result": function_result,
+                "function_called": last_name,
+                "function_result": last_result,
+                "functions_called": [
+                    {"name": name, "result": result} for name, result in executed
+                ],
                 "draft": session.current_draft
             }
-        
+
         else:
             # No tool call - just a conversational response
-            ai_message = message_response.content
+            ai_message = response.output_text
             session.add_message("assistant", ai_message)
-            
+
             return {
                 "success": True,
                 "message": ai_message,
                 "function_called": None,
+                "functions_called": [],
                 "draft": session.current_draft
             }
     
