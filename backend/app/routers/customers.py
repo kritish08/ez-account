@@ -18,6 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.deps import get_current_user
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.services.credit_notes import face_value as _cn_face_value
+from app.services.credit_notes import remaining as _cn_remaining
 from app.services.ledger import create_ledger_entry, delete_ledger_entries, get_account_balance
 from app.services.payments_apply import get_customer_credit
 
@@ -73,9 +75,14 @@ async def list_customers(current_user: dict = Depends(get_current_user)):
             "balance": {"$sum": {"$subtract": ["$debit", "$credit"]}},
         }},
     ]
+    # Credit still spendable per customer → remaining balance, not face
+    # value. `$ifNull` covers notes written before the total/remaining split.
     credit_pipeline = [
-        {"$match": {"total": {"$gt": 0}}},
-        {"$group": {"_id": "$customer_id", "credit": {"$sum": "$total"}}},
+        {"$group": {
+            "_id": "$customer_id",
+            "credit": {"$sum": {"$ifNull": ["$remaining_amount", "$total"]}},
+        }},
+        {"$match": {"credit": {"$gt": 0}}},
     ]
     customers, outstanding_rows, credit_rows = await asyncio.gather(
         db.customers.find({}, {"_id": 0}).sort("name", 1).to_list(None),
@@ -246,8 +253,10 @@ async def get_customer_ledger(
             "narration": f"Credit Note {cn.get('credit_note_number', '')} — {cn.get('reason', '')}",
             "debit": 0,
             "credit": 0,  # CN Creation DOES NOT reduce outstanding
-            "cn_total": cn.get("total", 0),
-            "status": "active" if cn.get("total", 0) > 0 else "exhausted",
+            # Face value on the statement line; "active" reflects whether any
+            # credit is still spendable.
+            "cn_total": _cn_face_value(cn),
+            "status": "active" if _cn_remaining(cn) > 0 else "exhausted",
         })
 
     # ---- Credit Note Applications (Credit - reduces outstanding) ----
