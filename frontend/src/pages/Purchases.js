@@ -53,7 +53,6 @@ import { toast } from "sonner";
 import { Plus, ShoppingCart, Loader2, Trash2, Banknote, Building2, Clock, MoreHorizontal, Pencil, ScanLine, Upload, CheckCircle2, XCircle, FileText } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
 import { UIFilters } from "../components/UIFilters";
-import BarcodeScanner from '../components/BarcodeScanner';
 import { SearchableProductSelect } from '../components/SearchableProductSelect';
 
 const Purchases = () => {
@@ -66,7 +65,6 @@ const Purchases = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [parsing, setParsing] = useState(false); // Renamed from scanning to parsing
-  const [scannerOpen, setScannerOpen] = useState(false); // New state for barcode scanner
   const fileInputRef = React.useRef(null);
   const fileInputCameraRef = React.useRef(null);
   const [editingPurchase, setEditingPurchase] = useState(null);

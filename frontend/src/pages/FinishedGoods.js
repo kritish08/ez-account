@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useModules } from "../context/ModulesContext";
 import { getProducts, createProduct, updateProduct, deleteProduct, formatCurrency } from "../lib/api";
-import BarcodeScanner from "../components/BarcodeScanner";
+import BarcodeScanner from "../components/LazyBarcodeScanner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
