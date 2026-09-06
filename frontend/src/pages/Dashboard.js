@@ -32,6 +32,25 @@ import {
   Trash2,
 } from "lucide-react";
 
+// Tint behind each stat-card icon, keyed by the card's text colour.
+//
+// This was built by string surgery — `bg-${color.split('-')[1]}-50` — which
+// Tailwind's scanner cannot see, so none of these classes were ever compiled.
+// They only rendered because index.html also pulled in the Tailwind Play CDN,
+// a full JIT compiler running in the browser. Removing that script (which is
+// ~120KB of render-blocking JS) would have silently flattened all nine cards
+// to no background. Written out in full, they are compiled like any other
+// class and survive on their own.
+const ICON_CHIP_BG = {
+  "text-emerald-600": "bg-emerald-50",
+  "text-brand-600": "bg-brand-50",
+  "text-rose-600": "bg-rose-50",
+  "text-blue-600": "bg-blue-50",
+  "text-amber-600": "bg-amber-50",
+  "text-orange-600": "bg-orange-50",
+  "text-indigo-600": "bg-indigo-50",
+};
+
 const StatCard = ({ icon: Icon, label, value, subValue, color }) => (
   <Card className="hover:shadow-md transition-shadow">
     <CardContent className="p-6">
@@ -43,7 +62,7 @@ const StatCard = ({ icon: Icon, label, value, subValue, color }) => (
           </p>
           {subValue && <p className="text-xs text-slate-400 mt-1">{subValue}</p>}
         </div>
-        <div className={`p-3 rounded-lg ${color ? `bg-${color.split('-')[1]}-50` : "bg-slate-100"}`}>
+        <div className={`p-3 rounded-lg ${ICON_CHIP_BG[color] || "bg-slate-100"}`}>
           <Icon className={`h-5 w-5 ${color || "text-slate-600"}`} />
         </div>
       </div>
