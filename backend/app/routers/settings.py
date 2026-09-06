@@ -19,12 +19,14 @@ from datetime import datetime, timezone
 import boto3
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.config import MASTER_ENCRYPTION_KEY
 from app.database import db
 from app.deps import get_current_user, require_admin
 from app.schemas.settings import (
     ModulesSettings, S3Settings, SystemResetRequest, SystemSettings,
 )
 from app.services.auth import verify_password
+from app.services.crypto import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,10 @@ async def save_s3_settings(settings: S3Settings, current_user: dict = Depends(ge
         existing = await db.settings.find_one({"type": "s3"}, {"_id": 0, "aws_secret_access_key": 1})
         if not existing or not existing.get("aws_secret_access_key"):
             raise HTTPException(status_code=400, detail="Cannot save: no existing secret to preserve. Provide aws_secret_access_key.")
-        secret = existing["aws_secret_access_key"]
+        # Stored value may be encrypted (or plaintext, if written before
+        # encryption at rest). Decrypt so the live-credential check below
+        # runs against the real secret.
+        secret = decrypt_secret(existing["aws_secret_access_key"], MASTER_ENCRYPTION_KEY)
 
     try:
         s3_client = boto3.client(
@@ -112,7 +117,10 @@ async def save_s3_settings(settings: S3Settings, current_user: dict = Depends(ge
     settings_doc = {
         "type": "s3",
         **settings.model_dump(),
-        "aws_secret_access_key": secret,
+        # Encrypted at rest. The `settings` collection is included in every
+        # backup archive, so a plaintext secret here meant each backup
+        # shipped the credentials that created it.
+        "aws_secret_access_key": encrypt_secret(secret, MASTER_ENCRYPTION_KEY),
         "configured": True,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
@@ -133,7 +141,7 @@ async def test_s3_connection(settings: S3Settings, current_user: dict = Depends(
         existing = await db.settings.find_one({"type": "s3"}, {"_id": 0, "aws_secret_access_key": 1})
         if not existing or not existing.get("aws_secret_access_key"):
             return {"success": False, "message": "No stored secret to test against. Provide aws_secret_access_key."}
-        secret = existing["aws_secret_access_key"]
+        secret = decrypt_secret(existing["aws_secret_access_key"], MASTER_ENCRYPTION_KEY)
 
     try:
         s3_client = boto3.client(

@@ -32,7 +32,7 @@ from app.deps import get_current_user, require_admin
 from app.schemas.settings import BackupRestoreRequest, BackupScheduleSettings
 from app.services.auth import verify_password
 from app.services.backup import apply_backup_schedule
-from app.services.crypto import decrypt_data, encrypt_data
+from app.services.crypto import decrypt_data, decrypt_secret, encrypt_data
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ async def create_backup(current_user: dict = Depends(get_current_user)):
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=s3_settings["aws_access_key_id"],
-                aws_secret_access_key=s3_settings["aws_secret_access_key"],
+                aws_secret_access_key=decrypt_secret(s3_settings["aws_secret_access_key"], MASTER_ENCRYPTION_KEY),
                 region_name=s3_settings.get("region", "us-east-1"),
             )
             s3_client.put_object(
@@ -150,7 +150,7 @@ async def list_backups(current_user: dict = Depends(get_current_user)):
         s3_client = boto3.client(
             's3',
             aws_access_key_id=s3_settings["aws_access_key_id"],
-            aws_secret_access_key=s3_settings["aws_secret_access_key"],
+            aws_secret_access_key=decrypt_secret(s3_settings["aws_secret_access_key"], MASTER_ENCRYPTION_KEY),
             region_name=s3_settings.get("region", "us-east-1")
         )
 
@@ -252,7 +252,7 @@ async def restore_backup(
         s3_client = boto3.client(
             's3',
             aws_access_key_id=s3_settings["aws_access_key_id"],
-            aws_secret_access_key=s3_settings["aws_secret_access_key"],
+            aws_secret_access_key=decrypt_secret(s3_settings["aws_secret_access_key"], MASTER_ENCRYPTION_KEY),
             region_name=s3_settings.get("region", "us-east-1")
         )
 
