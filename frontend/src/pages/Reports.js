@@ -683,7 +683,7 @@ const Reports = () => {
                         <TableRow
                           key={item.product_id}
                           className="cursor-pointer hover:bg-slate-50"
-                          onClick={() => navigate("/products")}
+                          onClick={() => navigate(`/products/${item.product_id}`)}
                         >
                           <TableCell className="font-medium">
                             <div className="flex flex-col">
