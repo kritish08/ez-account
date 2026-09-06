@@ -21,7 +21,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import MASTER_ENCRYPTION_KEY
 from app.database import db
-from app.services.crypto import encrypt_data
+from app.services.crypto import decrypt_secret, encrypt_data
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ async def scheduled_backup_job():
             s3_client = boto3.client(
                 "s3",
                 aws_access_key_id=s3_settings["aws_access_key_id"],
-                aws_secret_access_key=s3_settings.get("aws_secret_access_key", ""),
+                aws_secret_access_key=decrypt_secret(s3_settings.get("aws_secret_access_key", ""), MASTER_ENCRYPTION_KEY),
                 region_name=s3_settings.get("region", "us-east-1"),
             )
             s3_client.put_object(
