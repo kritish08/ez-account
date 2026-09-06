@@ -9,7 +9,7 @@ const NotFound = () => {
     const { token } = useAuth();
 
     return (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-100 px-4">
+        <div className="min-h-screen-dvh flex flex-col items-center justify-center bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-100 px-4">
             {/* Decorative background circles */}
             <div
                 className="absolute top-1/4 left-1/4 w-64 h-64 rounded-full opacity-5 pointer-events-none"

@@ -67,7 +67,7 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen-dvh flex">
       {/* Left side - Image */}
       <div
         className="hidden lg:flex lg:w-1/2 bg-cover bg-center relative"
