@@ -96,7 +96,21 @@ async def _seed_counter_from_max(counter_name: str, coll_name: str, field: str, 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Server starting up...")
-    voice_state.set_manager(WebSocketSessionManager(db))
+
+    # The voice assistant is an optional add-on; the accounting app must boot
+    # without it. Constructing the manager builds an AI client that raises if
+    # its credentials are missing or malformed, and an unguarded call here
+    # killed the whole API at startup over a voice-only config problem. The
+    # voice routes already handle a None manager by returning 503 — that path
+    # was simply unreachable because the process died first.
+    try:
+        voice_state.set_manager(WebSocketSessionManager(db))
+    except Exception as e:
+        logger.warning(
+            "Voice assistant unavailable — continuing without it. "
+            "Voice endpoints will return 503. Cause: %s: %s",
+            type(e).__name__, e,
+        )
 
     # ---- Indexes ----
     # Hot-path lookups by id and email. Without these every authenticated
