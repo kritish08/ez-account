@@ -19,7 +19,7 @@ import {
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, Loader2, Package, AlertTriangle, Info, Camera, Upload, ScanLine } from "lucide-react";
-import BarcodeScanner from '../components/BarcodeScanner';
+import BarcodeScanner from '../components/LazyBarcodeScanner';
 import { SearchableProductSelect } from '../components/SearchableProductSelect';
 
 const CreateInvoice = () => {
