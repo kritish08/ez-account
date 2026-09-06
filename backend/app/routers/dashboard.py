@@ -76,9 +76,15 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         {"$match": {"date": {"$gte": month_start}, "status": {"$ne": "draft"}}},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}},
     ]
+    # Outstanding customer credit = what's still SPENDABLE, so this tracks
+    # `remaining_amount`, not the note's face value. `$ifNull` keeps legacy
+    # notes (written before the total/remaining split, where `total` held
+    # the remaining balance) reporting correctly.
     credit_pipeline = [
-        {"$match": {"total": {"$gt": 0}}},
-        {"$group": {"_id": None, "total": {"$sum": "$total"}}},
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": {"$ifNull": ["$remaining_amount", "$total"]}},
+        }},
     ]
     month_exp_pipeline = [
         {"$match": {"date": {"$gte": month_start}}},

@@ -25,6 +25,8 @@ from app.database import db
 from app.deps import get_current_user
 from app.schemas.credit_note import CreditNoteCreate, CreditNoteUpdate
 from app.services.counters import get_next_credit_note_number
+from app.services.credit_notes import face_value as _face_value
+from app.services.credit_notes import remaining as _remaining
 from app.services.ledger import create_ledger_entry, delete_ledger_entries
 from app.services.money import _money
 from app.services.stock import create_stock_movement, delete_stock_movements
@@ -78,7 +80,14 @@ async def create_credit_note(cn: CreditNoteCreate, current_user: dict = Depends(
         "customer_name": customer["name"],
         "invoice_id": cn.invoice_id,
         "items": items,
+        # `total` is the immutable face value of the note — what was
+        # returned. `remaining_amount` is the spendable balance, decremented
+        # as the note is applied to invoices. Overloading a single `total`
+        # field for both meant every consumer that read it as "the amount of
+        # this credit note" (sales report, P&L, dashboard) went wrong the
+        # moment the note was applied.
         "total": total,
+        "remaining_amount": total,
         "reason": cn.reason,
         "date": cn_date,
         "created_at": datetime.now(timezone.utc).isoformat()
@@ -106,6 +115,21 @@ async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_us
     existing = await db.credit_notes.find_one({"id": cn_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Credit Note not found")
+
+    # Refuse to edit a note whose credit has already been spent. Editing
+    # recomputes the face value and re-posts the ledger pair; on a partly
+    # applied note that re-issued the consumed credit, so the customer kept
+    # both the credit they had already used AND a full fresh balance.
+    # Mirrors the guards on update_invoice / update_purchase.
+    consumed = _face_value(existing) - _remaining(existing)
+    if consumed > 0.001:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This credit note has already been applied to an invoice and "
+                "can no longer be edited. Delete it and issue a new one instead."
+            ),
+        )
 
     # Reverse existing effects — independent collections.
     await asyncio.gather(
@@ -144,7 +168,9 @@ async def update_credit_note(cn_id: str, cn_update: CreditNoteUpdate, current_us
 
     update_data = {
         "items": items,
+        # Safe to reset both: the guard above proved nothing has been spent.
         "total": total,
+        "remaining_amount": total,
         "reason": cn_update.reason,
         "date": cn_date,
         "invoice_id": cn_update.invoice_id,
@@ -197,21 +223,28 @@ async def delete_credit_note(cn_id: str, current_user: dict = Depends(get_curren
     if not existing:
         raise HTTPException(status_code=404, detail="Credit Note not found")
 
-    # Reverse the CN amount already applied to any linked invoice.
-    # When a CN is applied via apply_credit_note_to_invoice, the invoice's
-    # paid_amount is increased and the CN's total is decreased. Deleting the
-    # CN must undo this.
-    if existing.get("invoice_id"):
-        linked_invoice = await db.invoices.find_one({"id": existing["invoice_id"]})
-        if linked_invoice:
-            cn_applied = linked_invoice.get("credit_note_applied", 0)
-            if cn_applied > 0:
-                new_paid = max(0, linked_invoice.get("paid_amount", 0) - cn_applied)
-                new_status = "paid" if new_paid >= linked_invoice["total"] else ("partially_paid" if new_paid > 0 else "unpaid")
-                await db.invoices.update_one(
-                    {"id": existing["invoice_id"]},
-                    {"$set": {"paid_amount": new_paid, "status": new_status, "credit_note_applied": 0}}
-                )
+    # Refuse to delete a note whose credit has already been spent.
+    #
+    # The old unwind read the invoice's `credit_note_applied`, which is a
+    # running total across EVERY credit note applied to that invoice — so
+    # deleting one of two notes reversed both their amounts and re-opened
+    # the invoice for credit the other note had legitimately settled. It
+    # also only looked at `cn["invoice_id"]`, while a note can be applied
+    # to any invoice named at payment time, so applications elsewhere were
+    # silently left in place.
+    #
+    # Until credit-note applications are tracked per-note (the way
+    # `payment_allocations` tracks cash), refusing the delete is the only
+    # answer that can't corrupt the books.
+    consumed = _face_value(existing) - _remaining(existing)
+    if consumed > 0.001:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This credit note has already been applied to an invoice and "
+                "cannot be deleted. Reverse the payment that applied it first."
+            ),
+        )
 
     # Independent collections — gather to overlap round-trips.
     # We only reverse the on-create ledger pair (ref_type="credit_note");
