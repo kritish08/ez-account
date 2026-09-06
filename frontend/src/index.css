@@ -142,6 +142,12 @@
         /* Stops iOS/Android inflating text in landscape, which broke
            carefully-sized table and card layouts. */
         -webkit-text-size-adjust: 100%;
+
+        /* The app is light-only. Without this, a browser on an OS set to
+           dark renders the controls it draws itself — date pickers, select
+           popups, scrollbars, autofill backgrounds — in dark, against a
+           light UI. Declaring the scheme keeps them consistent. */
+        color-scheme: light;
     }
 
     body {

@@ -51,12 +51,30 @@ module.exports = {
                 border: 'hsl(var(--border))',
                 input: 'hsl(var(--input))',
                 ring: 'hsl(var(--ring))',
+                // Indigo, shifted one stop darker than Tailwind's own scale:
+                // brand-600 (#4338ca) is Tailwind indigo-700, brand-700 is
+                // indigo-800, brand-900 is indigo-900.
+                //
+                // 200, 300, 400 and 800 were missing while the app referenced
+                // brand-200 six times and brand-800 three times — nine classes
+                // that compiled to nothing. Most visibly, "Sign in with
+                // Passkey" on the login screen asked for `border-brand-200`
+                // and rendered with no border at all, so the app's own
+                // biometric login didn't read as a button.
+                //
+                // 200/300/400 are the standard indigo stops (the light end of
+                // the scale is unshifted); 800 is interpolated between
+                // brand-700 and brand-900 to keep the dark end even.
                 brand: {
                     50: '#eef2ff',
                     100: '#e0e7ff',
+                    200: '#c7d2fe',
+                    300: '#a5b4fc',
+                    400: '#818cf8',
                     500: '#6366f1',
                     600: '#4338ca',
                     700: '#3730a3',
+                    800: '#342f92',
                     900: '#312e81'
                 },
                 chart: {
