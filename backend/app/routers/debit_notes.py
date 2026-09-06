@@ -84,15 +84,24 @@ async def create_debit_note(dn: DebitNoteCreate, current_user: dict = Depends(ge
     }
     await db.debit_notes.insert_one(dn_doc)
 
-    # Supplier-AP debit (reduces payable) + purchases_returns credit
-    # (reduces expense). Independent accounts — gather.
+    # Supplier-AP debit (reduces payable) + inventory_asset credit (the
+    # goods physically left). This mirrors create_purchase, which debits
+    # inventory_asset for the gross bill — so a return has to credit the
+    # same account or the asset stays booked against goods we no longer
+    # hold, and the overstatement compounds with every return.
+    #
+    # This used to credit a `purchases_returns` account, which balanced the
+    # trial balance but left inventory_asset untouched: the ledger and the
+    # physical stock valuation drifted apart permanently. Nothing read
+    # `purchases_returns` — it was a periodic-inventory artifact in an
+    # otherwise perpetual system. Independent accounts — gather.
     await asyncio.gather(
         create_ledger_entry(
             f"supplier:{dn.supplier_id}", total, 0,
             f"Debit Note {dn_number}", "debit_note", dn_id, dn_date,
         ),
         create_ledger_entry(
-            "purchases_returns", 0, total,
+            "inventory_asset", 0, total,
             f"Debit Note {dn_number}", "debit_note", dn_id, dn_date,
         ),
     )
@@ -157,16 +166,15 @@ async def update_debit_note(dn_id: str, dn_update: DebitNoteUpdate, current_user
     await db.debit_notes.update_one({"id": dn_id}, {"$set": update_data})
 
     # Re-create BOTH ledger entries to match create_debit_note. The previous
-    # update only re-posted the supplier debit; the offsetting purchases_returns
-    # credit was permanently lost on the first edit, overstating purchase
-    # expenses. Independent accounts — gather.
+    # update only re-posted the supplier debit; the offsetting credit was
+    # permanently lost on the first edit. Independent accounts — gather.
     await asyncio.gather(
         create_ledger_entry(
             f"supplier:{existing['supplier_id']}", total, 0,
             f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date,
         ),
         create_ledger_entry(
-            "purchases_returns", 0, total,
+            "inventory_asset", 0, total,
             f"Debit Note {existing['debit_note_number']}", "debit_note", dn_id, dn_date,
         ),
     )
