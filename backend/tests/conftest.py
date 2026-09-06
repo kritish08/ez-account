@@ -20,11 +20,11 @@ os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017/?directConnection=
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-not-for-prod")
 os.environ.setdefault("MASTER_ENCRYPTION_KEY", "0" * 64)
 os.environ.setdefault("CORS_ORIGINS", "http://localhost")
-# Voice creds aren't needed for the suites here, but the lifespan
-# tries to construct a VoiceAIHandler — give it stubs so import doesn't
-# crash.
-os.environ.setdefault("AZURE_OPENAI_ENDPOINT", "https://placeholder.openai.azure.com/")
-os.environ.setdefault("AZURE_OPENAI_KEY", "placeholder")
+# Voice creds aren't needed for the suites here. The lifespan now boots
+# fine without them (a missing key logs a warning and leaves the voice
+# manager unset), but supplying a stub keeps that path exercised rather
+# than skipped.
+os.environ.setdefault("OPENAI_API_KEY", "sk-placeholder-not-a-real-key")
 
 import bcrypt
 import pytest
