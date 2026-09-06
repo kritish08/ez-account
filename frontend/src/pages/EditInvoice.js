@@ -176,7 +176,7 @@ const EditInvoice = () => {
     <div className="max-w-3xl mx-auto animate-fade-in" data-testid="edit-invoice-page">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
-        <Button variant="ghost" size="icon" onClick={() => navigate(`/invoices/${id}`)}>
+        <Button variant="ghost" size="icon" aria-label="Back to invoice" onClick={() => navigate(`/invoices/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div>
@@ -288,7 +288,7 @@ const EditInvoice = () => {
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size="icon" aria-label="Remove this line item"
                     onClick={() => handleRemoveItem(index)}
                     disabled={formData.items.length === 1}
                     className="text-slate-400 hover:text-red-600"

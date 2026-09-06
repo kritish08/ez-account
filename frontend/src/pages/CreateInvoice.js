@@ -420,7 +420,7 @@ const CreateInvoice = () => {
       {/* Header */}
       <div className="flex items-center justify-between gap-4 mb-8">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate("/invoices")}>
+          <Button variant="ghost" size="icon" aria-label="Back to invoices" onClick={() => navigate("/invoices")}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
@@ -624,7 +624,7 @@ const CreateInvoice = () => {
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon"
+                      size="icon" aria-label="Remove this line item"
                       onClick={() => handleRemoveItem(index)}
                       disabled={formData.items.length === 1}
                       className="text-slate-400 hover:text-red-600 mt-6"
