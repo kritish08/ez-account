@@ -1,4 +1,7 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+/* Fonts are loaded from public/index.html with a preconnect. An @import
+   here could not be discovered until this stylesheet had itself been
+   downloaded and parsed, which put the font files two hops further down a
+   serial request chain. */
 
 @tailwind base;
 @tailwind components;
@@ -103,6 +106,20 @@
 
 .badge-partially_paid {
     @apply bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20;
+}
+
+/* Both places that render a status pill build the class as
+   `badge-${invoice.status}`, so every status an invoice can hold needs a
+   rule here or the pill renders unstyled — colourless text where its
+   siblings are green, red or amber. `draft` was missing from the start;
+   `publishing` is the transient state a publish now claims before it
+   posts, and is only ever visible if a publish fails mid-flight. */
+.badge-draft {
+    @apply bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-500/20;
+}
+
+.badge-publishing {
+    @apply bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20;
 }
 
 /* Debug wrapper fix */
