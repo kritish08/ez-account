@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { getCustomers, createCustomer, updateCustomer, deleteCustomer, formatCurrency } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent } from "../components/ui/card";
+import { ResponsiveList, ListCard } from "../components/ResponsiveList";
 import {
   Dialog,
   DialogContent,
@@ -59,6 +60,7 @@ const EMPTY_FORM = {
 };
 
 const Customers = () => {
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -220,6 +222,9 @@ const Customers = () => {
               <Label htmlFor="phone">Phone</Label>
               <Input
                 id="phone"
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel"
                 name="phone"
                 value={formData.phone}
                 onChange={handleChange}
@@ -244,6 +249,9 @@ const Customers = () => {
               <Label htmlFor="gstin">GSTIN (Optional)</Label>
               <Input
                 id="gstin"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
                 name="gstin"
                 value={formData.gstin}
                 onChange={handleChange}
@@ -261,7 +269,7 @@ const Customers = () => {
                     <Input
                       id="opening_balance"
                       name="opening_balance"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       value={formData.opening_balance}
                       onChange={handleChange}
@@ -383,7 +391,34 @@ const Customers = () => {
         </Card>
       ) : filteredCustomers.length > 0 ? (
         <Card>
-          <CardContent className="p-0">
+          <CardContent className="p-0 max-md:px-4">
+            <ResponsiveList
+              items={filteredCustomers}
+              renderCard={(customer) => (
+                <ListCard
+                  primary={customer.name}
+                  secondary={customer.phone || customer.address || "—"}
+                  amount={
+                    customer.outstanding > 0
+                      ? formatCurrency(customer.outstanding)
+                      : customer.credit_balance > 0
+                        ? formatCurrency(customer.credit_balance)
+                        : null
+                  }
+                  amountClassName={
+                    customer.outstanding > 0 ? "text-amber-600" : "text-emerald-600"
+                  }
+                  meta={
+                    customer.outstanding > 0
+                      ? "Outstanding"
+                      : customer.credit_balance > 0
+                        ? "In credit"
+                        : "Settled"
+                  }
+                  onClick={() => navigate(`/customers/${customer.id}`)}
+                />
+              )}
+            >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -490,6 +525,7 @@ const Customers = () => {
                 ))}
               </TableBody>
             </Table>
+            </ResponsiveList>
           </CardContent>
         </Card>
       ) : (

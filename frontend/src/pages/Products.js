@@ -226,7 +226,7 @@ const Products = () => {
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
                     <Input
                       id="selling_price"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       min="0"
                       value={formData.selling_price}
@@ -243,7 +243,7 @@ const Products = () => {
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
                     <Input
                       id="cost_price"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       min="0"
                       value={formData.cost_price}
@@ -261,7 +261,7 @@ const Products = () => {
                     <Label htmlFor="opening_stock">Opening Stock</Label>
                     <Input
                       id="opening_stock"
-                      type="number"
+                      type="number" inputMode="decimal"
                       min="0"
                       value={formData.opening_stock}
                       onChange={(e) => setFormData((prev) => ({ ...prev, opening_stock: e.target.value }))}
@@ -275,7 +275,7 @@ const Products = () => {
                   <Label htmlFor="low_stock_threshold">Low Stock Alert</Label>
                   <Input
                     id="low_stock_threshold"
-                    type="number"
+                    type="number" inputMode="decimal"
                     min="0"
                     value={formData.low_stock_threshold}
                     onChange={(e) => setFormData((prev) => ({ ...prev, low_stock_threshold: e.target.value }))}
