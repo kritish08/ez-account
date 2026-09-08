@@ -1,14 +1,21 @@
-name: tests
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
+    name: backend tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       # mongodb-atlas-local exposes a single-member replica set, which the
@@ -23,11 +30,14 @@ jobs:
       MONGO_URL: mongodb://localhost:27017/?directConnection=true
       JWT_SECRET: ci-jwt-secret-not-for-prod
       MASTER_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      # Unset CORS_ORIGINS is a boot failure by design, so CI must supply one.
       CORS_ORIGINS: http://localhost
-      AZURE_OPENAI_ENDPOINT: https://placeholder.openai.azure.com/
-      AZURE_OPENAI_KEY: placeholder
-      DEPLOYMENT_NAME_GPT52: gpt-5.2
-      DEPLOYMENT_NAME_WHISPER: whisper
+      # A stub key keeps the AI wiring on the exercised path rather than the
+      # "voice unavailable" branch. No request ever leaves the runner.
+      OPENAI_API_KEY: sk-placeholder-not-a-real-key
+      OPENAI_MODEL: gpt-5.6
+      OPENAI_VISION_MODEL: gpt-5.6
+      OPENAI_TRANSCRIBE_MODEL: gpt-4o-transcribe
 
     steps:
       - uses: actions/checkout@v4
@@ -59,3 +69,91 @@ jobs:
       - name: Run pytest
         working-directory: backend
         run: pytest -v
+
+  frontend:
+    name: frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install deps
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        working-directory: frontend
+        env:
+          # Mirrors the production Dockerfile. CI is not validating the URL,
+          # only that the bundle compiles and stays within budget.
+          REACT_APP_BACKEND_URL: http://localhost:8001
+          GENERATE_SOURCEMAP: "false"
+          CI: "false" # CRA treats warnings as errors when CI=true
+        run: npm run build
+
+      - name: No source maps in the build
+        working-directory: frontend
+        run: |
+          maps=$(find build -name '*.map' | wc -l)
+          echo "source maps emitted: $maps"
+          test "$maps" -eq 0
+
+      - name: No Tailwind CDN in index.html
+        working-directory: frontend
+        run: |
+          if grep -q 'cdn.tailwindcss.com' build/index.html; then
+            echo "The Tailwind CDN script is back in index.html."
+            echo "It is a render-blocking runtime compiler on top of the"
+            echo "already-compiled stylesheet — remove it again."
+            exit 1
+          fi
+
+      - name: Initial JS stays under budget
+        working-directory: frontend
+        run: |
+          # Only the entry chunk: everything else is route-split and fetched
+          # on navigation. 119 KB gzipped at the time of writing.
+          budget=140000
+          size=$(cat build/static/js/main.*.js | gzip -9 -c | wc -c)
+          echo "initial JS: $size bytes gzipped (budget $budget)"
+          test "$size" -le "$budget"
+
+  hygiene:
+    name: no credentials in the tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credential-bearing files stay deleted
+        run: |
+          # These three shipped a live Atlas URI and a live Azure OpenAI key,
+          # and ref/ was not in .dockerignore, so they rode into the image.
+          # Deleted in 7f911d7; this keeps them from coming back.
+          found=$(git ls-files | grep -E '^backend/(test_db\.py|ref/demo\.(py|js))$' || true)
+          if [ -n "$found" ]; then
+            echo "These files are tracked again:"
+            echo "$found"
+            exit 1
+          fi
+
+      - name: No real .env files tracked
+        run: |
+          # .env.production.template and friends are meant to be tracked —
+          # they carry key names, never values. Anything else is a leak.
+          found=$(git ls-files \
+            | grep -E '(^|/)\.env(\..*)?$' \
+            | grep -vE '\.(template|example|sample)$' || true)
+          if [ -n "$found" ]; then
+            echo "Tracked .env files:"
+            echo "$found"
+            exit 1
+          fi
