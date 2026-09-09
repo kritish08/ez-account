@@ -206,6 +206,14 @@ export const getS3Settings = () => axios.get(`${API}/settings/s3`);
 export const saveS3Settings = (data) => axios.post(`${API}/settings/s3`, data);
 export const testS3Connection = (data) => axios.post(`${API}/settings/s3/test`, data);
 
+// AI credential (bring-your-own OpenAI key). The GET never returns the key
+// itself — only whether one is configured, where it came from, and a tail
+// to match against your OpenAI dashboard.
+export const getOpenAISettings = () => axios.get(`${API}/settings/openai`);
+export const saveOpenAISettings = (data) => axios.post(`${API}/settings/openai`, data);
+export const testOpenAIKey = (data) => axios.post(`${API}/settings/openai/test`, data);
+export const deleteOpenAIKey = () => axios.delete(`${API}/settings/openai`);
+
 // Backup. Note: S3 credential config lives under /settings/s3 (see above) —
 // the previous getS3Config/updateS3Config exports pointed at a /backup/config
 // route that doesn't exist on the backend; removed.

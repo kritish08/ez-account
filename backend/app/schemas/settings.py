@@ -1,7 +1,12 @@
 """Settings / modules / backup-schedule / S3 / reset schemas."""
 
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# What the GET endpoints hand back in place of a stored secret, and what the
+# client sends back to mean "leave it alone". Shared so the schema validator
+# and the router agree on the token.
+OPENAI_KEY_MASK = "********"
 
 
 class ModulesSettings(BaseModel):
@@ -36,6 +41,47 @@ class S3Settings(BaseModel):
     aws_secret_access_key: str
     bucket_name: str
     region: str = "us-east-1"
+
+
+class OpenAISettings(BaseModel):
+    """Bring-your-own-key for the AI features (bill scanning, voice).
+
+    `api_key` accepts the literal mask the GET endpoint hands out, meaning
+    "keep the key you already have and change the other fields" — the same
+    contract the S3 form uses. Anything else must at least look like a key,
+    so a truncated paste is caught here rather than on the first invoice.
+    """
+    api_key: str = Field(min_length=1)
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    vision_model: Optional[str] = None
+    transcribe_model: Optional[str] = None
+    transcribe_language: Optional[str] = None
+
+    @field_validator("api_key")
+    @classmethod
+    def _looks_like_a_key(cls, v: str) -> str:
+        v = v.strip()
+        if v == OPENAI_KEY_MASK:
+            return v
+        # Project, service-account and legacy user keys all start "sk-";
+        # length is the part a truncated copy-paste gets wrong.
+        if not v.startswith("sk-") or len(v) < 20:
+            raise ValueError(
+                'That does not look like an OpenAI API key — they start with '
+                '"sk-". Copy it again from platform.openai.com/api-keys.'
+            )
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def _https_only(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        v = v.strip()
+        if not v.startswith("https://"):
+            raise ValueError("The base URL must be https://.")
+        return v
 
 
 class SystemSettings(BaseModel):

@@ -23,10 +23,13 @@ from app.config import MASTER_ENCRYPTION_KEY
 from app.database import db
 from app.deps import get_current_user, require_admin
 from app.schemas.settings import (
-    ModulesSettings, S3Settings, SystemResetRequest, SystemSettings,
+    OPENAI_KEY_MASK, ModulesSettings, OpenAISettings, S3Settings,
+    SystemResetRequest, SystemSettings,
 )
+from app.services import ai_credentials
 from app.services.auth import verify_password
 from app.services.crypto import decrypt_secret, encrypt_secret
+from services.ai_service import reset_client as reset_ai_client
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +168,140 @@ async def test_s3_connection(settings: S3Settings, current_user: dict = Depends(
         if error_code == '403':
             return {"success": False, "message": "Access denied to bucket"}
         return {"success": False, "message": f"Error: {str(e)}"}
+
+
+async def _probe_openai(api_key: str, base_url: str | None) -> list[str]:
+    """One cheap authenticated call, to prove the key works before it's saved.
+
+    Listing models is the smallest request that exercises authentication
+    without spending tokens. Patched out in tests — nothing here should
+    reach the network during a test run.
+    """
+    from openai import AsyncOpenAI  # noqa: PLC0415
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=15.0)
+    try:
+        page = await client.models.list()
+        return [m.id for m in page.data]
+    finally:
+        await client.close()
+
+
+async def _stored_openai_key() -> str | None:
+    doc = await db.settings.find_one({"type": "openai"}, {"_id": 0, "api_key": 1})
+    if not doc or not doc.get("api_key"):
+        return None
+    return decrypt_secret(doc["api_key"], MASTER_ENCRYPTION_KEY)
+
+
+@router.get("/settings/openai")
+async def get_openai_settings(current_user: dict = Depends(get_current_user)):
+    """Everything about the AI credential except the credential.
+
+    `source` is the useful part: it tells you whether the app is running on
+    the key you pasted or on one baked into the deployment's environment.
+    """
+    doc = await db.settings.find_one({"type": "openai"}, {"_id": 0}) or {}
+    creds = await ai_credentials.resolve(use_cache=False)
+
+    return {
+        "configured": creds is not None,
+        "source": creds.source if creds else "none",
+        "key_hint": ai_credentials.key_hint(creds.api_key) if creds else "",
+        # Echo the chosen models so the form shows what is actually in force,
+        # including the values inherited from env or left at their defaults.
+        "model": creds.model if creds else None,
+        "vision_model": creds.vision_model if creds else None,
+        "transcribe_model": creds.transcribe_model if creds else None,
+        "transcribe_language": creds.transcribe_language if creds else None,
+        "base_url": creds.base_url if creds else None,
+        # Whether *this* record exists, as opposed to an env fallback.
+        "saved_in_settings": bool(doc.get("api_key")),
+        "updated_at": doc.get("updated_at"),
+    }
+
+
+@router.post("/settings/openai")
+async def save_openai_settings(
+    settings: OpenAISettings, current_user: dict = Depends(require_admin)
+):
+    api_key = settings.api_key
+    if api_key == OPENAI_KEY_MASK:
+        api_key = await _stored_openai_key()
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="No stored key to keep. Paste your OpenAI API key.",
+            )
+
+    doc = {
+        "type": "openai",
+        # Encrypted at rest: the settings collection travels inside every
+        # backup archive, so a plaintext key here would ship with them.
+        "api_key": encrypt_secret(api_key, MASTER_ENCRYPTION_KEY),
+        "base_url": settings.base_url,
+        "model": settings.model,
+        "vision_model": settings.vision_model,
+        "transcribe_model": settings.transcribe_model,
+        "transcribe_language": settings.transcribe_language,
+        "configured": True,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.settings.update_one({"type": "openai"}, {"$set": doc}, upsert=True)
+
+    # The whole point of storing it here is that it takes effect now.
+    ai_credentials.invalidate()
+    reset_ai_client()
+
+    logger.info("OpenAI credential updated by %s", current_user.get("email"))
+    return {"message": "OpenAI settings saved"}
+
+
+@router.delete("/settings/openai")
+async def delete_openai_settings(current_user: dict = Depends(require_admin)):
+    """Forget the stored key and fall back to the environment, if any."""
+    await db.settings.delete_one({"type": "openai"})
+    ai_credentials.invalidate()
+    reset_ai_client()
+
+    creds = await ai_credentials.resolve(use_cache=False)
+    logger.info("OpenAI credential removed by %s", current_user.get("email"))
+    return {
+        "message": "OpenAI key removed",
+        "source": creds.source if creds else "none",
+    }
+
+
+@router.post("/settings/openai/test")
+async def test_openai_credential(
+    settings: OpenAISettings, current_user: dict = Depends(require_admin)
+):
+    """Check a key against OpenAI without saving it."""
+    api_key = settings.api_key
+    if api_key == OPENAI_KEY_MASK:
+        api_key = await _stored_openai_key()
+        if not api_key:
+            return {"success": False, "message": "No stored key to test. Paste one first."}
+
+    try:
+        models = await _probe_openai(api_key, settings.base_url)
+    except Exception as e:  # noqa: BLE001 — surfaced to the user, never raised
+        # Never echo the key: OpenAI's own 401 body quotes it back verbatim,
+        # and this response is rendered in a browser and pasted into chats.
+        message = str(e).replace(api_key, "…") if api_key else str(e)
+        if "401" in message or "Incorrect API key" in message or "invalid_api_key" in message:
+            message = "OpenAI rejected that key. Check it hasn't been revoked or rotated."
+        elif "429" in message:
+            message = "The key works, but the account is rate-limited or out of quota."
+        return {"success": False, "message": message[:300]}
+
+    wanted = settings.model
+    return {
+        "success": True,
+        "message": f"Key works — {len(models)} models available.",
+        "models": sorted(models)[:50],
+        "requested_model_available": (wanted in models) if wanted else None,
+    }
 
 
 @router.get("/auth/config")
