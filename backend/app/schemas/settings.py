@@ -9,6 +9,11 @@ class ModulesSettings(BaseModel):
     enable_debit_notes: bool = True
     enable_advanced_ims: bool = False
     enable_production: bool = False
+    # GST is opt-in. Off means invoices behave exactly as they did before
+    # the module existed — no tax fields, no tax accounts, no change to any
+    # figure. An existing business must never find tax switched on under it,
+    # and a business not registered for GST should never see the machinery.
+    enable_gst: bool = False
 
 
 class BackupScheduleSettings(BaseModel):
@@ -46,3 +51,10 @@ class SystemSettings(BaseModel):
 class SystemResetRequest(BaseModel):
     password: str
     confirmation: str  # must equal RESET_CONFIRMATION_PHRASE (typed deliberately)
+
+
+class BackupRestoreRequest(BaseModel):
+    """Restore overwrites every collection in the archive — same blast
+    radius as a factory reset, so it takes the same two extra factors."""
+    password: str
+    confirmation: str  # must equal RESTORE_CONFIRMATION_PHRASE (typed deliberately)

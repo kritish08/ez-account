@@ -1,13 +1,23 @@
-import os
-import io
-import json
+"""Invoice / receipt image parsing via the OpenAI Responses API.
+
+Talks to OpenAI directly (api.openai.com). This previously used Azure
+OpenAI with a deployment name; the two clients also disagreed about the
+endpoint format — this module stripped `/openai/...` and used
+`AzureOpenAI`, while the voice handler passed the raw endpoint as a
+plain `base_url`, so a single env var could not satisfy both and one of
+the two features was always misconfigured. Both now use the same
+native client and the same `OPENAI_API_KEY`.
+"""
+
 import base64
-import shutil
-import uuid
+import json
 import logging
-from openai import AzureOpenAI
-from fastapi import UploadFile, HTTPException
+import os
+import uuid
+
 from dotenv import load_dotenv
+from fastapi import HTTPException, UploadFile
+from openai import AsyncOpenAI
 
 # Load environment variables
 load_dotenv()
@@ -15,42 +25,37 @@ load_dotenv()
 # Logger
 logger = logging.getLogger(__name__)
 
-# Configure Azure OpenAI Client lazy loaded
-client = None
+# Vision-capable model used to read the bill. Override per-deployment.
+VISION_MODEL = os.getenv("OPENAI_VISION_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6"
 
-def get_client():
+# Lazily-built async client — the API key may be absent in dev, and the
+# rest of the app has to boot regardless.
+client: AsyncOpenAI | None = None
+
+
+def get_client() -> AsyncOpenAI | None:
     global client
     if client:
         return client
-    
-    # Try both common names
-    api_key = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_OPENAI_KEY")
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    
-    if not api_key or not endpoint:
-        logger.warning("AZURE_OPENAI_KEY or AZURE_OPENAI_ENDPOINT not set. AI features will fail.")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY not set — AI invoice parsing is unavailable.")
         return None
-        
-    # Clean endpoint for AzureOpenAI client (it expects resource root, not full path)
-    # e.g. https://my-resource.openai.azure.com/openai/v1/ -> https://my-resource.openai.azure.com/
-    base_endpoint = endpoint.split("/openai/")[0].rstrip("/")
-    if not base_endpoint.startswith("http"):
-        base_endpoint = "https://" + base_endpoint
-        
+
+    # `base_url` is only for OpenAI-compatible gateways/proxies; unset means
+    # api.openai.com, which is what a normal deployment wants.
+    base_url = os.getenv("OPENAI_BASE_URL") or None
     try:
-        client = AzureOpenAI(
-            api_key=api_key,
-            api_version="2024-02-15-preview",
-            azure_endpoint=base_endpoint
-        )
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         return client
     except Exception as e:
-        logger.error(f"Error initializing Azure OpenAI client: {e}")
+        logger.error(f"Error initializing OpenAI client: {e}")
         return None
 
 async def parse_invoice_image(file: UploadFile):
     """
-    Parses an uploaded invoice image using Azure OpenAI GPT-4o.
+    Parses an uploaded invoice image with the OpenAI Responses API.
     Returns extracted JSON data.
     """
     # 1. Save the image locally for persistence
@@ -129,28 +134,30 @@ async def parse_invoice_image(file: UploadFile):
         5. PRIORITY ORDER: (Quantity * Rate) > Written Total.
         """
 
-        client = get_client()
-        if not client:
+        ai = get_client()
+        if not ai:
             raise HTTPException(status_code=500, detail="AI service not configured. Check server logs.")
 
-        # Use the deployment name from environment variables, defaulting to "gpt-4o"
-        deployment_name = os.getenv("DEPLOYMENT_NAME_GPT52") or os.getenv("DEPLOYMENT_NAME_GPT4O") or "gpt-4o"
-
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Extract data from this invoice."},
-                    {"type": "image_url", "image_url": {"url": f"data:{file.content_type};base64,{encoded_image}"}}
-                ]}
+        response = await ai.responses.create(
+            model=VISION_MODEL,
+            instructions=system_prompt,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Extract data from this invoice."},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:{file.content_type};base64,{encoded_image}",
+                        },
+                    ],
+                }
             ],
-            max_completion_tokens=4096,
-            temperature=0,
-            response_format={"type": "json_object"}
+            max_output_tokens=4096,
+            text={"format": {"type": "json_object"}},
         )
 
-        content = response.choices[0].message.content
+        content = response.output_text
         # The model might wrap JSON in markdown, so clean it up
         cleaned_content = content.replace("```json", "").replace("```", "").strip()
         data = json.loads(cleaned_content)
@@ -165,8 +172,8 @@ async def parse_invoice_image(file: UploadFile):
         raise
     except Exception as e:
         # Log full detail server-side, return a generic message to the client.
-        # The Azure/OpenAI SDK's `str(e)` can include the endpoint URL,
-        # deployment name, and other infra details that should not leak.
+        # The OpenAI SDK's `str(e)` can include the endpoint URL, model
+        # name, and other infra details that should not leak.
         logger.exception(f"AI invoice parsing failed: {e}")
         raise HTTPException(
             status_code=500,

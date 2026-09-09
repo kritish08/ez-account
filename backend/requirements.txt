@@ -67,7 +67,11 @@ mypy==1.19.1
 mypy_extensions==1.1.0
 numpy==2.4.1
 oauthlib==3.3.1
-openai==1.99.9
+# 2.x is the newest line that still builds against the httpx 0.28 /
+# jiter 0.12 pins below. openai 3.x switches to httpx2 and cascades
+# into idna/anyio conflicts across this frozen file — that upgrade is
+# its own piece of work. 2.x has the full Responses API.
+openai==2.54.0
 openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.3
@@ -102,6 +106,10 @@ python-multipart==0.0.21
 pytokens==0.3.0
 pytz==2025.2
 PyYAML==6.0.3
+# Imported by app/routers/products.py::product_labels to render QR labels.
+# It was missing here, so the endpoint raised ModuleNotFoundError at request
+# time in any clean container while working on developer machines.
+qrcode==8.2
 referencing==0.37.0
 regex==2026.1.15
 reportlab==4.4.9

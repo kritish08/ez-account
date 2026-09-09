@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends
 
 from app.database import db
 from app.deps import get_current_user
+from app.services.credit_notes import face_value as _cn_face_value
 from app.services.ledger import get_account_balance
 from app.services.money import _money
 from app.services.stock import get_all_product_stock
@@ -73,9 +74,14 @@ async def report_credit(current_user: dict = Depends(get_current_user)):
     # Group by customer_id without filtering on the customers list, so the
     # CN aggregation can run in parallel with the customers fetch. The
     # customer-iteration loop below filters out any orphaned rows.
+    # Credit a customer can still spend → remaining balance, not face value.
+    # `$ifNull` keeps notes written before the total/remaining split correct.
     credit_pipeline = [
-        {"$match": {"total": {"$gt": 0}}},
-        {"$group": {"_id": "$customer_id", "credit": {"$sum": "$total"}}},
+        {"$group": {
+            "_id": "$customer_id",
+            "credit": {"$sum": {"$ifNull": ["$remaining_amount", "$total"]}},
+        }},
+        {"$match": {"credit": {"$gt": 0}}},
     ]
     customers, credit_rows = await asyncio.gather(
         db.customers.find({}, {"_id": 0}).to_list(None),
@@ -119,12 +125,16 @@ async def report_sales(start_date: Optional[str] = None, end_date: Optional[str]
     # Two independent reads — fire concurrently.
     invoices, credit_notes = await asyncio.gather(
         db.invoices.find(query, {"_id": 0}).sort("date", -1).to_list(None),
-        db.credit_notes.find(cn_query, {"_id": 0, "total": 1}).to_list(None),
+        db.credit_notes.find(
+            cn_query, {"_id": 0, "total": 1, "remaining_amount": 1, "items": 1}
+        ).to_list(None),
     )
     total = sum(inv["total"] for inv in invoices)
     collected = sum(inv.get("paid_amount", 0) for inv in invoices)
     total_cost = sum(inv.get("total_cost", 0) for inv in invoices)
-    total_returns = sum(cn["total"] for cn in credit_notes)
+    # Count what was RETURNED (face value), not what's left unspent — an
+    # applied credit note is still a sales return.
+    total_returns = sum(_cn_face_value(cn) for cn in credit_notes)
 
     profit = (total - total_returns) - total_cost
 
@@ -485,7 +495,8 @@ async def report_profit_loss(start_date: Optional[str] = None, end_date: Optiona
     )
     total_sales = sum(inv["total"] for inv in invoices)
     total_cost_of_goods = sum(inv.get("total_cost", 0) for inv in invoices)
-    total_credit_notes = sum(cn["total"] for cn in credit_notes)
+    # Face value — an applied credit note still offsets revenue in the P&L.
+    total_credit_notes = sum(_cn_face_value(cn) for cn in credit_notes)
     total_debit_notes = sum(dn["total"] for dn in debit_notes)
 
     net_sales = total_sales - total_credit_notes

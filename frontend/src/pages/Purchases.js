@@ -53,7 +53,6 @@ import { toast } from "sonner";
 import { Plus, ShoppingCart, Loader2, Trash2, Banknote, Building2, Clock, MoreHorizontal, Pencil, ScanLine, Upload, CheckCircle2, XCircle, FileText } from "lucide-react";
 import { PageHeader } from "../components/PageHeader";
 import { UIFilters } from "../components/UIFilters";
-import BarcodeScanner from '../components/BarcodeScanner';
 import { SearchableProductSelect } from '../components/SearchableProductSelect';
 
 const Purchases = () => {
@@ -66,7 +65,6 @@ const Purchases = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [parsing, setParsing] = useState(false); // Renamed from scanning to parsing
-  const [scannerOpen, setScannerOpen] = useState(false); // New state for barcode scanner
   const fileInputRef = React.useRef(null);
   const fileInputCameraRef = React.useRef(null);
   const [editingPurchase, setEditingPurchase] = useState(null);
@@ -491,7 +489,7 @@ const Purchases = () => {
                     capture="environment"
                     onChange={handleFileChange}
                   />
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       variant="secondary"
                       size="sm"
@@ -506,7 +504,8 @@ const Purchases = () => {
                       size="sm"
                       onClick={handleCameraClick}
                       disabled={parsing} // Changed from scanning to parsing
-                      className="hidden md:flex" // Ideally visible on mobile, keeping consistent
+                      // Camera capture is a phone affordance; was inverted.
+                      className="flex md:hidden"
                     >
                       <ScanLine className="h-4 w-4 mr-2" />
                       Take Photo
@@ -600,17 +599,17 @@ const Purchases = () => {
                         </div>
                         <div className="col-span-4 md:col-span-2 space-y-1">
                           <Label className="text-xs">Qty</Label>
-                          <Input type="number" min="0" step="1" value={item.quantity} onChange={(e) => handleItemChange(index, "quantity", e.target.value)} className="font-mono" data-testid={`purchase-item-qty-${index}`} />
+                          <Input type="number" inputMode="decimal" min="0" step="1" value={item.quantity} onChange={(e) => handleItemChange(index, "quantity", e.target.value)} className="font-mono" data-testid={`purchase-item-qty-${index}`} />
                         </div>
                         <div className="col-span-4 md:col-span-3 space-y-1">
                           <Label className="text-xs">Cost Price</Label>
                           <div className="relative">
                             <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-xs">₹</span>
-                            <Input type="number" min="0" step="0.01" value={item.cost_price} onChange={(e) => handleItemChange(index, "cost_price", e.target.value)} className="pl-5 font-mono" data-testid={`purchase-item-price-${index}`} />
+                            <Input type="number" inputMode="decimal" min="0" step="0.01" value={item.cost_price} onChange={(e) => handleItemChange(index, "cost_price", e.target.value)} className="pl-5 font-mono" data-testid={`purchase-item-price-${index}`} />
                           </div>
                         </div>
                         <div className="col-span-4 md:col-span-2 flex justify-end items-end h-[56px]">
-                          <Button type="button" variant="ghost" size="icon" onClick={() => handleRemoveItem(index)} disabled={formData.items.length === 1} className="text-slate-400 hover:text-red-600 mb-[2px]">
+                          <Button type="button" variant="ghost" size="icon" aria-label="Remove this line item" onClick={() => handleRemoveItem(index)} disabled={formData.items.length === 1} className="text-slate-400 hover:text-red-600 mb-[2px]">
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>

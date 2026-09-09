@@ -19,7 +19,7 @@ import {
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, Loader2, Package, AlertTriangle, Info, Camera, Upload, ScanLine } from "lucide-react";
-import BarcodeScanner from '../components/BarcodeScanner';
+import BarcodeScanner from '../components/LazyBarcodeScanner';
 import { SearchableProductSelect } from '../components/SearchableProductSelect';
 
 const CreateInvoice = () => {
@@ -417,10 +417,15 @@ const CreateInvoice = () => {
 
   return (
     <div className="max-w-3xl mx-auto animate-fade-in" data-testid="create-invoice-page">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4 mb-8">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate("/invoices")}>
+      {/* Header.
+          `flex-wrap` matters at 375px: un-hiding the camera button put two
+          whitespace-nowrap buttons (270px together) next to the back arrow and
+          title on a justify-between row, which pushed the page 66px wider than
+          the viewport. Wrapping drops the button group onto its own line
+          instead of overflowing. */}
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
+        <div className="flex min-w-0 items-center gap-4">
+          <Button variant="ghost" size="icon" aria-label="Back to invoices" onClick={() => navigate("/invoices")}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
@@ -473,7 +478,11 @@ const CreateInvoice = () => {
               variant="outline"
               onClick={handleCameraClick}
               disabled={parsing}
-              className="gap-2 hidden md:flex"
+              // `capture="environment"` opens the rear camera on a phone and is
+              // ignored on desktop, where the Upload button beside this one
+              // already covers file picking. This was `hidden md:flex` — shown
+              // only where there is no camera, and hidden everywhere there is.
+              className="gap-2 flex md:hidden"
             >
               <Camera className="h-4 w-4" />
               Take Photo
@@ -583,7 +592,7 @@ const CreateInvoice = () => {
                   <div className="col-span-4 md:col-span-2 space-y-2">
                     <Label className="text-xs text-slate-500">Qty</Label>
                     <Input
-                      type="number"
+                      type="number" inputMode="decimal"
                       min="0"
                       step="0.01"
                       value={item.quantity}
@@ -598,7 +607,7 @@ const CreateInvoice = () => {
                     <div className="relative">
                       <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-sm">₹</span>
                       <Input
-                        type="number"
+                        type="number" inputMode="decimal"
                         min="0"
                         step="0.01"
                         value={item.rate}
@@ -620,7 +629,7 @@ const CreateInvoice = () => {
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon"
+                      size="icon" aria-label="Remove this line item"
                       onClick={() => handleRemoveItem(index)}
                       disabled={formData.items.length === 1}
                       className="text-slate-400 hover:text-red-600 mt-6"

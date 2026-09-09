@@ -1,7 +1,7 @@
 """
 Function Executor for Voice Assistant
 
-Executes grounded functions based on GPT-5.2 function calls.
+Executes grounded functions based on GPT-5.5 function calls.
 All functions are based on actual database schema and API capabilities.
 """
 
@@ -258,7 +258,8 @@ class FunctionExecutor:
     async def save_invoice(
         self,
         as_draft: bool = False,
-        payment_received: float = 0
+        payment_received: float = 0,
+        payment_mode: str = "cash"
     ) -> Dict[str, Any]:
         """
         Save the invoice to database.
@@ -291,6 +292,10 @@ class FunctionExecutor:
         total = self.session.current_draft["total"]
         paid_amount = min(payment_received, total)  # Can't pay more than total
         balance = total - paid_amount
+        # A draft has no books, so it can't take a receipt either.
+        if as_draft:
+            paid_amount = 0
+            balance = total
         
         # Create invoice document
         invoice_doc = {
@@ -304,7 +309,12 @@ class FunctionExecutor:
             "date": self.session.current_draft["date"],
             "notes": self.session.current_draft.get("notes"),
             "is_draft": as_draft,
-            "status": "draft" if as_draft else "unpaid" if balance > 0 else "paid",
+            "status": (
+                "draft" if as_draft
+                else "paid" if balance <= 0.009
+                else "partially_paid" if paid_amount > 0.009
+                else "unpaid"
+            ),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": self.session.user_id
         }
@@ -346,6 +356,51 @@ class FunctionExecutor:
                         invoice_id,
                         invoice_date,
                     )
+
+            # Cash taken at the counter is a real payment, not just a field on
+            # the invoice. Previously `payment_received` was written straight
+            # onto paid_amount with no cash debit, no customer credit and no
+            # payments document: the invoice read as paid while the money never
+            # entered the books and the customer's outstanding never came down.
+            # Mirrors app/routers/payments.py::record_payment.
+            if paid_amount > 0.009:
+                payment_id = str(uuid.uuid4())
+                await self.db.payments.insert_one({
+                    "id": payment_id,
+                    "customer_id": invoice_doc["customer_id"],
+                    "customer_name": self.session.current_draft.get("customer_name"),
+                    "amount": paid_amount,
+                    "mode": payment_mode,
+                    "notes": f"Received against {invoice_number} (voice)",
+                    "invoice_id": invoice_id,
+                    "date": invoice_date,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                await self.db.payment_allocations.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "payment_id": payment_id,
+                    "invoice_id": invoice_id,
+                    "amount": paid_amount,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                await create_ledger_entry(
+                    account=payment_mode,
+                    debit=paid_amount,
+                    credit=0,
+                    narration=f"Payment against {invoice_number}",
+                    ref_type="payment",
+                    ref_id=payment_id,
+                    date=invoice_date,
+                )
+                await create_ledger_entry(
+                    account=f"customer:{invoice_doc['customer_id']}",
+                    debit=0,
+                    credit=paid_amount,
+                    narration=f"Payment against {invoice_number}",
+                    ref_type="payment",
+                    ref_id=payment_id,
+                    date=invoice_date,
+                )
 
         # Reset session
         self.session.reset_draft()

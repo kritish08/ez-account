@@ -33,7 +33,9 @@ export const AuthProvider = ({ children }) => {
       setUser(response.data);
     } catch (error) {
       console.error("Failed to fetch user:", error);
-      logout();
+      // The token is already rejected, so there is nothing for the server to
+      // revoke — just drop it locally rather than firing a doomed request.
+      clearSession();
     } finally {
       setLoading(false);
     }
@@ -66,11 +68,26 @@ export const AuthProvider = ({ children }) => {
     return response.data;
   };
 
-  const logout = () => {
+  const clearSession = () => {
     localStorage.removeItem("token");
     delete axios.defaults.headers.common["Authorization"];
     setToken(null);
     setUser(null);
+  };
+
+  // Tell the server to revoke this token before dropping it locally.
+  // Clearing localStorage alone left the token valid until it expired, so
+  // anything that had copied it kept working. Local state is cleared
+  // regardless of whether the call succeeds — being offline must not trap
+  // someone in a signed-in UI.
+  const logout = async ({ allDevices = false } = {}) => {
+    try {
+      await axios.post(`${API}/auth/${allDevices ? "logout-all" : "logout"}`);
+    } catch {
+      // Already expired, revoked, or unreachable — nothing to recover.
+    } finally {
+      clearSession();
+    }
   };
 
   return (

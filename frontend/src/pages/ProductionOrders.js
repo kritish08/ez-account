@@ -343,7 +343,7 @@ const ProductionOrders = () => {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Quantity to Produce *</Label>
-                <Input type="number" min="1" step="1" value={formData.quantity}
+                <Input type="number" inputMode="decimal" min="1" step="1" value={formData.quantity}
                   onChange={e => setFormData(prev => ({...prev, quantity: e.target.value}))} />
               </div>
               <div className="space-y-2">
@@ -555,7 +555,7 @@ const ProductionOrders = () => {
                         />
                       </div>
                       <div className="col-span-3">
-                        <Input type="number" min="0.001" step="0.001" value={comp.quantity} className="font-mono text-sm"
+                        <Input type="number" inputMode="decimal" min="0.001" step="0.001" value={comp.quantity} className="font-mono text-sm"
                           onChange={e => { const u = [...bomComponents]; u[idx].quantity = parseFloat(e.target.value) || 1; setBomComponents(u); }} />
                       </div>
                       <div className="col-span-2">

@@ -80,11 +80,21 @@ agenthub/agents/youtube/db
 .worktrees/
 
 # Mobile development
-android-sdk/ -e 
+android-sdk/
+
 # Environment files
 *.env
 *.env.*
--e 
-# Environment files
-*.env
-*.env.*
+
+# Local dev overlay: exposes the container ports and re-bakes the bundle
+# against localhost. Machine-specific, so it stays out of the repo.
+compose.override.yaml
+
+# Session handoff notes written by Claude Code between runs.
+SESSION_STATE.md
+
+# User-uploaded bill scans. These are per-deployment runtime data (the
+# Dockerfile removes the directory and compose mounts a volume over it),
+# and they contain real invoices, so they must never be committed.
+backend/uploads/
+uploads/

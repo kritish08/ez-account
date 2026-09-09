@@ -211,7 +211,10 @@ export const testS3Connection = (data) => axios.post(`${API}/settings/s3/test`, 
 // route that doesn't exist on the backend; removed.
 export const createBackup = () => axios.post(`${API}/backup/create`);
 export const listBackups = () => axios.get(`${API}/backup/list`);
-export const restoreBackup = (filename) => axios.post(`${API}/backup/restore/${filename}`);
+// Restore overwrites every collection in the archive, so it takes the same
+// password + verbatim-phrase confirmation as a factory reset.
+export const restoreBackup = (filename, data) =>
+  axios.post(`${API}/backup/restore/${filename}`, data);
 
 // AI Invoice Parsing (GPT-5.2 with Hindi/Hinglish support)
 export const parseInvoiceImage = (file) => {

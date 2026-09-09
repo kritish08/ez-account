@@ -13,7 +13,9 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClientSession
 
 from app.database import db
-from app.services.ledger import create_ledger_entry, get_account_balance
+from app.services.credit_notes import face_value as _cn_face_value
+from app.services.credit_notes import remaining as _cn_remaining
+from app.services.ledger import get_account_balance
 from app.services.money import _money
 
 
@@ -64,10 +66,19 @@ async def apply_payment_fifo(
 
 
 async def get_customer_credit(customer_id: str) -> float:
-    """Customer's available credit balance (sum of unconsumed credit notes)."""
+    """Customer's available credit balance (sum of unconsumed credit notes).
+
+    Sums the remaining balance, never the face value — spending against
+    face value would let the same credit be applied more than once.
+    `$ifNull` keeps notes written before the total/remaining split correct,
+    where `total` itself held the remaining balance.
+    """
     pipeline = [
-        {"$match": {"customer_id": customer_id, "total": {"$gt": 0}}},
-        {"$group": {"_id": None, "total": {"$sum": "$total"}}},
+        {"$match": {"customer_id": customer_id}},
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": {"$ifNull": ["$remaining_amount", "$total"]}},
+        }},
     ]
     result = await db.credit_notes.aggregate(pipeline).to_list(1)
     if result:
@@ -154,7 +165,13 @@ async def apply_credit_note_to_invoice(
     balanced. Posts the customer-ledger relief entry (CN-LEDGER fix).
     """
     cn = await db.credit_notes.find_one({"id": credit_note_id}, session=session)
-    if not cn or cn["total"] <= 0:
+    if not cn:
+        return 0
+
+    # Spend `remaining_amount`, never `total` — `total` is the note's
+    # immutable face value and is what the sales/P&L reports count.
+    cn_remaining = _cn_remaining(cn)
+    if cn_remaining <= 0:
         return 0
 
     invoice = await db.invoices.find_one({"id": invoice_id}, session=session)
@@ -165,12 +182,25 @@ async def apply_credit_note_to_invoice(
     if invoice_due <= 0:
         return 0
 
-    apply_amount = round(min(cn["total"], invoice_due), 2)
+    apply_amount = round(min(cn_remaining, invoice_due), 2)
 
-    # Atomically decrement CN with a >= filter — no negative balances.
+    # Atomically decrement the CN balance with a >= filter — no negative
+    # balances. Legacy notes (written before the total/remaining split) have
+    # no `remaining_amount`, so seed it from the old semantics first: there
+    # `total` WAS the remaining balance.
+    if "remaining_amount" not in cn:
+        await db.credit_notes.update_one(
+            {"id": credit_note_id, "remaining_amount": {"$exists": False}},
+            {"$set": {
+                "remaining_amount": cn_remaining,
+                "total": _cn_face_value(cn),
+            }},
+            session=session,
+        )
+
     cn_result = await db.credit_notes.update_one(
-        {"id": credit_note_id, "total": {"$gte": apply_amount}},
-        {"$inc": {"total": -apply_amount}},
+        {"id": credit_note_id, "remaining_amount": {"$gte": apply_amount}},
+        {"$inc": {"remaining_amount": -apply_amount}},
         session=session,
     )
     if cn_result.modified_count == 0:
@@ -189,15 +219,21 @@ async def apply_credit_note_to_invoice(
         # Roll back the CN side so books stay balanced.
         await db.credit_notes.update_one(
             {"id": credit_note_id},
-            {"$inc": {"total": apply_amount}},
+            {"$inc": {"remaining_amount": apply_amount}},
             session=session,
         )
         return 0
 
     # Reconcile status from the now-current paid_amount.
+    # No customer-ledger entry here — `create_credit_note` already posted
+    # the customer credit + sales_returns debit at the moment the CN was
+    # issued. Application is an internal allocation (which specific
+    # invoice the customer's credit reduces), not a fresh journal event.
+    # Double-posting here was the silent "customer balance drifts by CN
+    # amount on every applied CN" bug.
     updated_inv = await db.invoices.find_one(
         {"id": invoice_id},
-        {"_id": 0, "total": 1, "paid_amount": 1, "customer_id": 1, "invoice_number": 1, "date": 1},
+        {"_id": 0, "total": 1, "paid_amount": 1},
         session=session,
     )
     if updated_inv:
@@ -207,21 +243,6 @@ async def apply_credit_note_to_invoice(
             {"$set": {"status": new_status}},
             session=session,
         )
-
-        # Customer-ledger relief: the CN itself didn't post a customer entry
-        # when first created (only on application), so without this the
-        # outstanding balance stays stale.
-        if updated_inv.get("customer_id"):
-            await create_ledger_entry(
-                account=f"customer:{updated_inv['customer_id']}",
-                debit=0,
-                credit=apply_amount,
-                narration=f"Credit Note applied to Invoice {updated_inv.get('invoice_number', invoice_id)}",
-                ref_type="credit_note_application",
-                ref_id=credit_note_id,
-                date=updated_inv.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                session=session,
-            )
 
     return apply_amount
 

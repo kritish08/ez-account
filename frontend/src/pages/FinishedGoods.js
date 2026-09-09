@@ -1,8 +1,15 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useModules } from "../context/ModulesContext";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { getProducts, createProduct, updateProduct, deleteProduct, formatCurrency } from "../lib/api";
-import BarcodeScanner from "../components/BarcodeScanner";
+import BarcodeScanner from "../components/LazyBarcodeScanner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -64,6 +71,8 @@ const FinishedGoods = () => {
     cost_price: "",
     opening_stock: "",
     low_stock_threshold: "10",
+    hsn: "",
+    gst_rate: "",
   });
 
   const [refreshKey, setRefreshKey] = useState(0);
@@ -230,7 +239,7 @@ const FinishedGoods = () => {
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
                     <Input
                       id="selling_price"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       min="0"
                       value={formData.selling_price}
@@ -247,7 +256,7 @@ const FinishedGoods = () => {
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">₹</span>
                     <Input
                       id="cost_price"
-                      type="number"
+                      type="number" inputMode="decimal"
                       step="0.01"
                       min="0"
                       value={formData.cost_price}
@@ -265,7 +274,7 @@ const FinishedGoods = () => {
                     <Label htmlFor="opening_stock">Opening Stock</Label>
                     <Input
                       id="opening_stock"
-                      type="number"
+                      type="number" inputMode="decimal"
                       min="0"
                       value={formData.opening_stock}
                       onChange={(e) => setFormData((prev) => ({ ...prev, opening_stock: e.target.value }))}
@@ -279,7 +288,7 @@ const FinishedGoods = () => {
                   <Label htmlFor="low_stock_threshold">Low Stock Alert</Label>
                   <Input
                     id="low_stock_threshold"
-                    type="number"
+                    type="number" inputMode="decimal"
                     min="0"
                     value={formData.low_stock_threshold}
                     onChange={(e) => setFormData((prev) => ({ ...prev, low_stock_threshold: e.target.value }))}
@@ -288,6 +297,41 @@ const FinishedGoods = () => {
                   />
                 </div>
               </div>
+
+              {/* Only rendered when the GST module is on — a business that
+                  isn't registered should never be asked for a tax slab. */}
+              {modules?.enable_gst && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="hsn">HSN / SAC code</Label>
+                    <Input
+                      id="hsn"
+                      value={formData.hsn}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, hsn: e.target.value }))}
+                      placeholder="e.g. 1006"
+                      inputMode="numeric"
+                      className="font-mono"
+                      data-testid="product-hsn-input"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="gst_rate">GST rate</Label>
+                    <Select
+                      value={String(formData.gst_rate ?? "")}
+                      onValueChange={(v) => setFormData((prev) => ({ ...prev, gst_rate: v }))}
+                    >
+                      <SelectTrigger id="gst_rate" data-testid="product-gst-rate">
+                        <SelectValue placeholder="Select rate" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {["0", "0.25", "3", "5", "12", "18", "28"].map((r) => (
+                          <SelectItem key={r} value={r}>{r}%</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-3 pt-4">
                 <Button type="button" variant="outline" onClick={() => { setDialogOpen(false); resetForm(); }}>
@@ -403,7 +447,7 @@ const FinishedGoods = () => {
                     <TableCell>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" className="h-8 w-8 p-0">
+                          <Button variant="ghost" className="h-8 w-8 p-0" aria-label="Row actions">
                             <MoreHorizontal className="h-4 w-4" />
                           </Button>
                         </DropdownMenuTrigger>

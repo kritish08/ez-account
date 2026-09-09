@@ -41,7 +41,7 @@ class VoiceSession:
         Get current session context for AI.
         
         Returns context about what user is currently working on,
-        which helps GPT-5.2 make better function calling decisions.
+        which helps GPT-5.5 make better function calling decisions.
         """
         return {
             "session_id": self.session_id,
