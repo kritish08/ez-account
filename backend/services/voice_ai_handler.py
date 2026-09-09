@@ -12,6 +12,8 @@ from typing import Any, Dict
 
 from openai import AsyncOpenAI
 
+from app.services import ai_credentials
+
 from .voice_session import VoiceSession
 from .function_executor import FunctionExecutor
 
@@ -322,27 +324,45 @@ class VoiceAIHandler:
     """
     
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is not set — voice assistant unavailable")
+        # Deliberately does no credential work. The session manager builds
+        # this at boot, which is long before anyone has pasted a key into
+        # Settings — refusing to construct here used to take the whole voice
+        # subsystem down for the lifetime of the process, so a key added
+        # later needed a restart to be noticed.
+        self._client: AsyncOpenAI | None = None
+        self._client_key: str | None = None
 
-        # Chat model driving the tool-calling loop.
-        self.model = os.getenv("OPENAI_MODEL", "gpt-5.6")
-        # Speech-to-text model. gpt-4o-transcribe handles code-switched
-        # Hindi/English noticeably better than whisper-1 on short utterances.
-        self.transcribe_model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+    async def get_client(self) -> AsyncOpenAI:
+        """The OpenAI client for this turn, rebuilt if the key has changed.
+
+        Raises RuntimeError when nothing is configured; callers surface that
+        to the socket as a message telling the user where to add a key.
+        """
+        creds = await ai_credentials.require()
+
+        if self._client is None or self._client_key != creds.api_key:
+            # `base_url` is only for OpenAI-compatible gateways; unset means
+            # api.openai.com. Async client so the tool loop never blocks the
+            # event loop — the previous sync client froze the whole server
+            # for the duration of every voice turn.
+            self._client = AsyncOpenAI(api_key=creds.api_key, base_url=creds.base_url)
+            self._client_key = creds.api_key
+        return self._client
+
+    # Model choices follow the same settings → env → default order as the
+    # key itself, resolved per turn so a change in Settings applies at once.
+    async def get_model(self) -> str:
+        return (await ai_credentials.require()).model
+
+    async def get_transcribe_model(self) -> str:
+        # gpt-4o-transcribe handles code-switched Hindi/English noticeably
+        # better than whisper-1 on short utterances.
+        return (await ai_credentials.require()).transcribe_model
+
+    async def get_transcribe_language(self) -> str | None:
         # ISO-639-1 hint. Shop-floor speech is Hinglish, and naming the
         # dominant language measurably reduces spurious transliteration.
-        self.transcribe_language = os.getenv("OPENAI_TRANSCRIBE_LANGUAGE") or None
-
-        # `base_url` is only for OpenAI-compatible gateways; unset means
-        # api.openai.com. Async client so the tool loop never blocks the
-        # event loop — the previous sync client froze the whole server for
-        # the duration of every voice turn.
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=os.getenv("OPENAI_BASE_URL") or None,
-        )
+        return (await ai_credentials.require()).transcribe_language
 
     async def transcribe_audio(
         self,
@@ -387,11 +407,14 @@ class VoiceAIHandler:
         buf = io.BytesIO(audio_bytes)
         buf.name = f"voice.{ext}"
 
-        kwargs = {"model": self.transcribe_model, "file": buf}
-        if self.transcribe_language:
-            kwargs["language"] = self.transcribe_language
+        client = await self.get_client()
+        language = await self.get_transcribe_language()
 
-        resp = await self.client.audio.transcriptions.create(**kwargs)
+        kwargs = {"model": await self.get_transcribe_model(), "file": buf}
+        if language:
+            kwargs["language"] = language
+
+        resp = await client.audio.transcriptions.create(**kwargs)
         text = getattr(resp, "text", None) or (resp if isinstance(resp, str) else "")
         return (text or "").strip()
     
@@ -442,8 +465,11 @@ class VoiceAIHandler:
             for func in VOICE_ASSISTANT_FUNCTIONS
         ]
 
-        response = await self.client.responses.create(
-            model=self.model,
+        client = await self.get_client()
+        model = await self.get_model()
+
+        response = await client.responses.create(
+            model=model,
             instructions=instructions,
             input=conversation,
             tools=tools,
@@ -474,8 +500,8 @@ class VoiceAIHandler:
 
             # Let the model narrate what actually happened, now that it can
             # see every tool result.
-            final_response = await self.client.responses.create(
-                model=self.model,
+            final_response = await client.responses.create(
+                model=model,
                 instructions=instructions,
                 input=conversation,
                 max_output_tokens=300,

@@ -19,39 +19,59 @@ from dotenv import load_dotenv
 from fastapi import HTTPException, UploadFile
 from openai import AsyncOpenAI
 
+from app.services import ai_credentials
+
 # Load environment variables
 load_dotenv()
 
 # Logger
 logger = logging.getLogger(__name__)
 
-# Vision-capable model used to read the bill. Override per-deployment.
-VISION_MODEL = os.getenv("OPENAI_VISION_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.6"
-
-# Lazily-built async client — the API key may be absent in dev, and the
-# rest of the app has to boot regardless.
+# Lazily-built async client — the key may be absent at boot (it is pasted
+# into Settings afterwards), and the rest of the app has to run regardless.
+# Cached against the credential that built it so a key change in Settings
+# is picked up without a restart.
 client: AsyncOpenAI | None = None
+_client_key: str | None = None
 
 
-def get_client() -> AsyncOpenAI | None:
-    global client
-    if client:
-        return client
+def reset_client() -> None:
+    """Drop the cached client. Called when the stored credential changes."""
+    global client, _client_key
+    client = None
+    _client_key = None
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        logger.warning("OPENAI_API_KEY not set — AI invoice parsing is unavailable.")
+
+async def get_client() -> AsyncOpenAI | None:
+    """The client to talk to OpenAI with, or None if no key is configured."""
+    global client, _client_key
+
+    creds = await ai_credentials.resolve()
+    if creds is None:
+        logger.warning(
+            "No OpenAI key configured — AI invoice parsing is unavailable. "
+            "Add one in Settings → AI."
+        )
+        reset_client()
         return None
 
-    # `base_url` is only for OpenAI-compatible gateways/proxies; unset means
-    # api.openai.com, which is what a normal deployment wants.
-    base_url = os.getenv("OPENAI_BASE_URL") or None
+    if client is not None and _client_key == creds.api_key:
+        return client
+
     try:
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        client = AsyncOpenAI(api_key=creds.api_key, base_url=creds.base_url)
+        _client_key = creds.api_key
         return client
     except Exception as e:
         logger.error(f"Error initializing OpenAI client: {e}")
+        reset_client()
         return None
+
+
+async def get_vision_model() -> str:
+    """Vision-capable model used to read the bill."""
+    creds = await ai_credentials.resolve()
+    return creds.vision_model if creds else ai_credentials.DEFAULT_VISION_MODEL
 
 async def parse_invoice_image(file: UploadFile):
     """
@@ -134,12 +154,15 @@ async def parse_invoice_image(file: UploadFile):
         5. PRIORITY ORDER: (Quantity * Rate) > Written Total.
         """
 
-        ai = get_client()
+        ai = await get_client()
         if not ai:
-            raise HTTPException(status_code=500, detail="AI service not configured. Check server logs.")
+            raise HTTPException(
+                status_code=503,
+                detail="Bill scanning needs an OpenAI API key. Add one in Settings → AI.",
+            )
 
         response = await ai.responses.create(
-            model=VISION_MODEL,
+            model=await get_vision_model(),
             instructions=system_prompt,
             input=[
                 {
