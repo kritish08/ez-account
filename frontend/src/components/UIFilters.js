@@ -25,13 +25,13 @@ export const UIFilters = ({
     onClear,
 }) => {
     return (
-        <div className="flex flex-col xl:flex-row items-start xl:items-center gap-3 mb-6">
+        <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 mb-6">
             {/* Search — only render the input when a setter was provided.
                 Some callers (e.g. CustomerDetail) don't have a search box but
                 still want the rest of the filter row; the previous version
                 would crash with "setSearch is not a function" on keystroke. */}
             {typeof setSearch === "function" && (
-                <div className="relative flex-1 w-full xl:max-w-sm">
+                <div className="relative flex-1 w-full md:max-w-sm">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                     <Input
                         placeholder={searchPlaceholder}
@@ -42,11 +42,11 @@ export const UIFilters = ({
                 </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
+            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
                 {/* Status Filter */}
                 {statusFilter !== undefined && (
                     <Select value={statusFilter} onValueChange={setStatusFilter}>
-                        <SelectTrigger className="w-[160px]">
+                        <SelectTrigger className="w-full sm:w-[160px]">
                             <Filter className="h-4 w-4 mr-2 text-slate-400" />
                             <SelectValue placeholder="Filter by status" />
                         </SelectTrigger>
@@ -70,7 +70,7 @@ export const UIFilters = ({
                 )}
 
                 {/* Clear Button */}
-                <Button variant="ghost" size="icon" onClick={onClear} title="Clear Filters">
+                <Button variant="ghost" size="icon" onClick={onClear} title="Clear filters" aria-label="Clear filters">
                     <X className="h-4 w-4 text-slate-500" />
                 </Button>
             </div>

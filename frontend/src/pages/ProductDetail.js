@@ -323,19 +323,19 @@ const ProductDetail = () => {
               </div>
               <div className="space-y-2">
                 <Label>Low Stock Alert</Label>
-                <Input type="number" value={formData.low_stock_threshold} onChange={e => setFormData({...formData, low_stock_threshold: e.target.value})} />
+                <Input type="number" inputMode="decimal" value={formData.low_stock_threshold} onChange={e => setFormData({...formData, low_stock_threshold: e.target.value})} />
               </div>
               <div className="space-y-2">
                 <Label>Reorder Point</Label>
-                <Input type="number" value={formData.reorder_point} onChange={e => setFormData({...formData, reorder_point: e.target.value})} placeholder="0" />
+                <Input type="number" inputMode="decimal" value={formData.reorder_point} onChange={e => setFormData({...formData, reorder_point: e.target.value})} placeholder="0" />
               </div>
               <div className="space-y-2">
                 <Label>Cost Price</Label>
-                <Input type="number" step="0.01" value={formData.cost_price} onChange={e => setFormData({...formData, cost_price: e.target.value})} />
+                <Input type="number" inputMode="decimal" step="0.01" value={formData.cost_price} onChange={e => setFormData({...formData, cost_price: e.target.value})} />
               </div>
               <div className="space-y-2">
                 <Label>Selling Price</Label>
-                <Input type="number" step="0.01" value={formData.selling_price} onChange={e => setFormData({...formData, selling_price: e.target.value})} />
+                <Input type="number" inputMode="decimal" step="0.01" value={formData.selling_price} onChange={e => setFormData({...formData, selling_price: e.target.value})} />
               </div>
             </div>
 

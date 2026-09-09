@@ -268,11 +268,11 @@ const CreditNotes = () => {
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <Label className="text-xs">Qty</Label>
-                                            <Input type="number" min="1" value={item.quantity} onChange={(e) => updateItem(index, "quantity", e.target.value)} />
+                                            <Input type="number" inputMode="decimal" min="1" value={item.quantity} onChange={(e) => updateItem(index, "quantity", e.target.value)} />
                                         </div>
                                         <div>
                                             <Label className="text-xs">Rate (₹)</Label>
-                                            <Input type="number" min="0" step="0.01" value={item.rate} onChange={(e) => updateItem(index, "rate", e.target.value)} />
+                                            <Input type="number" inputMode="decimal" min="0" step="0.01" value={item.rate} onChange={(e) => updateItem(index, "rate", e.target.value)} />
                                         </div>
                                     </div>
                                 </div>
@@ -360,7 +360,7 @@ const CreditNotes = () => {
                                                 <TableCell>
                                                     <DropdownMenu>
                                                         <DropdownMenuTrigger asChild>
-                                                            <Button variant="ghost" className="h-8 w-8 p-0"><MoreHorizontal className="h-4 w-4" /></Button>
+                                                            <Button variant="ghost" className="h-8 w-8 p-0" aria-label="Row actions"><MoreHorizontal className="h-4 w-4" /></Button>
                                                         </DropdownMenuTrigger>
                                                         <DropdownMenuContent align="end">
                                                             <DropdownMenuLabel>Actions</DropdownMenuLabel>

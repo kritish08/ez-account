@@ -11,6 +11,7 @@ export const ModulesProvider = ({ children }) => {
     enable_debit_notes: true,
     enable_advanced_ims: false,
     enable_production: false,
+    enable_gst: false,
   });
   const [loadingModules, setLoadingModules] = useState(true);
 
@@ -26,6 +27,7 @@ export const ModulesProvider = ({ children }) => {
         enable_debit_notes:  response.data.enable_debit_notes  ?? true,
         enable_advanced_ims: response.data.enable_advanced_ims ?? false,
         enable_production:   response.data.enable_production   ?? false,
+        enable_gst:          response.data.enable_gst          ?? false,
       });
     } catch (error) {
       console.error("Failed to load module settings:", error);

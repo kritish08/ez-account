@@ -40,14 +40,41 @@ from app.schemas.webauthn import (
 )
 from app.services.auth import _DUMMY_PASSWORD_HASH, create_access_token, verify_password
 from app.services.passkey import _b64url_to_bytes, _rebuild_attested_credentials, fido_server
+from app.services.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
+# Password login had no lockout at all: the ~80ms bcrypt cost was the only
+# brake on credential stuffing, and that parallelises trivially. Ten failures
+# in fifteen minutes per email is well clear of human fat-fingering while
+# making online guessing useless.
+LOGIN_MAX_ATTEMPTS = 10
+LOGIN_WINDOW_SECONDS = 15 * 60
+login_limiter = RateLimiter(
+    max_attempts=LOGIN_MAX_ATTEMPTS, window_seconds=LOGIN_WINDOW_SECONDS
+)
+
 
 @router.post("/auth/login", response_model=Token)
 async def login(user: UserLogin):
+    # Key on the submitted email, whether or not it exists. Throttling only
+    # real accounts would turn the 429 into an email-enumeration oracle and
+    # undo the constant-time work below.
+    throttle_key = (user.email or "").strip().lower()
+
+    retry_after = login_limiter.retry_after(throttle_key)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many failed sign-in attempts. "
+                f"Please retry in {retry_after // 60}m {retry_after % 60}s."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
+
     db_user = await db.users.find_one({"email": user.email}, {"_id": 0})
     # Always run verify_password (against the user's hash if present, or a
     # constant dummy hash if not) so the unknown-email branch takes the same
@@ -56,15 +83,75 @@ async def login(user: UserLogin):
     stored_hash = db_user["password_hash"] if db_user else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(user.password, stored_hash)
     if not db_user or not password_ok:
+        login_limiter.record(throttle_key)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    access_token = create_access_token(data={"sub": db_user["id"]})
+    # Clear on success so an occasional typo never leaves a legitimate user
+    # one mistake away from a lockout.
+    login_limiter.reset(throttle_key)
+    access_token = create_access_token(
+        data={"sub": db_user["id"], "tv": db_user.get("token_version", 0)}
+    )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
 @router.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     return {"id": current_user["id"], "email": current_user["email"], "name": current_user["name"]}
+
+
+@router.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    """Revoke the token used to make this request.
+
+    Logout was previously client-side only: the browser dropped the token
+    and the server carried on honouring it. Denylisting the jti makes
+    signing out actually mean something, while leaving the user's other
+    devices signed in.
+
+    The row carries the token's own expiry so a TTL index can sweep it —
+    the denylist never needs to outlive the tokens it denies.
+    """
+    claims = current_user.get("_token_claims") or {}
+    jti = claims.get("jti")
+    if not jti:
+        # Token predates jti support; nothing precise to revoke.
+        return {"message": "Signed out"}
+
+    expires_at = datetime.fromtimestamp(claims["exp"], tz=timezone.utc) if claims.get("exp") else (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    )
+    await db.revoked_tokens.update_one(
+        {"jti": jti},
+        {"$set": {
+            "jti": jti,
+            "user_id": current_user["id"],
+            "revoked_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at,
+        }},
+        upsert=True,
+    )
+    return {"message": "Signed out"}
+
+
+@router.post("/auth/logout-all")
+async def logout_all(current_user: dict = Depends(get_current_user)):
+    """Revoke every token ever issued to this account.
+
+    The lever to pull when a device is lost or a token is believed
+    leaked. Increments the account's token version, so every token
+    carrying an older one stops being accepted. The next login mints a
+    token at the new version and works normally.
+    """
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$inc": {"token_version": 1}},
+    )
+    logger.warning(
+        "All sessions revoked for user_id=%s email=%s",
+        current_user["id"], current_user.get("email"),
+    )
+    return {"message": "Signed out of all devices"}
 
 
 # ============== WEBAUTHN / PASSKEY AUTH ==============
@@ -265,7 +352,9 @@ async def authenticate_passkey_complete(data: WebAuthnAuthenticateComplete):
         )
         await db.webauthn_states.delete_one({"_id": state_doc["_id"]})
         logger.info(f"Passkey login successful for user {user['id']} (credential: {matched_id_b64[:20]}...)")
-        access_token = create_access_token(data={"sub": user["id"]})
+        access_token = create_access_token(
+            data={"sub": user["id"], "tv": user.get("token_version", 0)}
+        )
         return {"access_token": access_token, "token_type": "bearer"}
     except HTTPException:
         raise

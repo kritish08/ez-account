@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pymongo import ASCENDING, DESCENDING
 
 from app import voice_state
+from app.config import CORS_ORIGINS
 from app.database import client, db
 from app.services.backup import apply_backup_schedule, scheduler
 
@@ -96,7 +97,21 @@ async def _seed_counter_from_max(counter_name: str, coll_name: str, field: str, 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Server starting up...")
-    voice_state.set_manager(WebSocketSessionManager(db))
+
+    # The voice assistant is an optional add-on; the accounting app must boot
+    # without it. Constructing the manager builds an AI client that raises if
+    # its credentials are missing or malformed, and an unguarded call here
+    # killed the whole API at startup over a voice-only config problem. The
+    # voice routes already handle a None manager by returning 503 — that path
+    # was simply unreachable because the process died first.
+    try:
+        voice_state.set_manager(WebSocketSessionManager(db))
+    except Exception as e:
+        logger.warning(
+            "Voice assistant unavailable — continuing without it. "
+            "Voice endpoints will return 503. Cause: %s: %s",
+            type(e).__name__, e,
+        )
 
     # ---- Indexes ----
     # Hot-path lookups by id and email. Without these every authenticated
@@ -161,6 +176,13 @@ async def lifespan(app: FastAPI):
     # registration/auth handshakes (5-min window) so abandoned flows don't
     # accumulate. Also index the lookup keys.
     await _safe_create_index("webauthn_states", "expires_at", expireAfterSeconds=0)
+
+    # Revoked-token denylist, consulted on every authenticated request, so the
+    # jti lookup must be indexed. The TTL sweep drops each row once the token
+    # it denies has expired on its own — the denylist never grows unbounded
+    # and never needs to outlive its tokens.
+    await _safe_create_index("revoked_tokens", "jti", unique=True)
+    await _safe_create_index("revoked_tokens", "expires_at", expireAfterSeconds=0)
     await _safe_create_index("webauthn_states", [("user_id", ASCENDING), ("type", ASCENDING)])
     await _safe_create_index("webauthn_states", [("email", ASCENDING), ("type", ASCENDING)])
     # Credential ids are globally unique per the WebAuthn spec, so a plain
@@ -244,27 +266,13 @@ app.include_router(financial_router)
 app.include_router(ai_router)
 app.include_router(voice_router)
 
-# CORS — explicit origin list required when credentials are enabled.
-# Browsers reject `*` + credentials per the CORS spec, so that combo is never
-# allowed.
-_cors_origins_raw = os.environ.get("CORS_ORIGINS", "").strip()
-if _cors_origins_raw and _cors_origins_raw != "*":
-    _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_credentials=True,
-        allow_origins=_cors_origins,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    # No explicit origins configured — wildcard origins WITHOUT credentials.
-    # Lets public endpoints work in dev but blocks credentialed cross-origin
-    # requests until CORS_ORIGINS is set explicitly.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_credentials=False,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS — always an explicit origin list. config.parse_cors_origins refuses
+# to start on a missing value or a wildcard, so there is no permissive
+# fallback to drift into.
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)

@@ -176,7 +176,7 @@ const EditInvoice = () => {
     <div className="max-w-3xl mx-auto animate-fade-in" data-testid="edit-invoice-page">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
-        <Button variant="ghost" size="icon" onClick={() => navigate(`/invoices/${id}`)}>
+        <Button variant="ghost" size="icon" aria-label="Back to invoice" onClick={() => navigate(`/invoices/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div>
@@ -251,7 +251,7 @@ const EditInvoice = () => {
                 <div className="col-span-4 md:col-span-2 space-y-2">
                   <Label className="text-xs text-slate-500">Qty</Label>
                   <Input
-                    type="number"
+                    type="number" inputMode="decimal"
                     min="0"
                     step="0.01"
                     value={item.quantity}
@@ -266,7 +266,7 @@ const EditInvoice = () => {
                   <div className="relative">
                     <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 text-sm">₹</span>
                     <Input
-                      type="number"
+                      type="number" inputMode="decimal"
                       min="0"
                       step="0.01"
                       value={item.rate}
@@ -288,7 +288,7 @@ const EditInvoice = () => {
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size="icon" aria-label="Remove this line item"
                     onClick={() => handleRemoveItem(index)}
                     disabled={formData.items.length === 1}
                     className="text-slate-400 hover:text-red-600"

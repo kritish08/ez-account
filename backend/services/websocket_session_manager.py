@@ -14,11 +14,25 @@ from typing import Dict, Optional
 from fastapi import WebSocket
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.services.rate_limit import RateLimiter
+
 from .function_executor import FunctionExecutor
 from .voice_ai_handler import VoiceAIHandler
 from .voice_session import VoiceSession
 
 logger = logging.getLogger(__name__)
+
+# A voice turn costs a transcription plus one or two model calls, and the
+# socket previously accepted an unlimited number of them at any size. Both
+# limits are spend controls first and abuse controls second.
+#
+# 4 MB of decoded audio is roughly 8 minutes of Opus at 64 kbps — far longer
+# than the push-to-talk utterances this is built for.
+MAX_AUDIO_BYTES = 4 * 1024 * 1024
+VOICE_MAX_TURNS_PER_HOUR = 240
+voice_limiter = RateLimiter(
+    max_attempts=VOICE_MAX_TURNS_PER_HOUR, window_seconds=60 * 60
+)
 
 
 class WebSocketSessionManager:
@@ -110,6 +124,21 @@ class WebSocketSessionManager:
                 "message": "Session not found. Please reconnect."
             }
         
+        # Every branch below either transcribes, calls the model, or both, so
+        # the spend gate goes here rather than per-branch.
+        retry_after = voice_limiter.retry_after(user_id)
+        if retry_after:
+            return {
+                "type": "error",
+                "error": "rate_limited",
+                "message": (
+                    f"Voice limit reached ({VOICE_MAX_TURNS_PER_HOUR} per hour). "
+                    f"Please retry in {retry_after // 60}m {retry_after % 60}s."
+                ),
+                "retry_after": retry_after,
+            }
+        voice_limiter.record(user_id)
+
         session = self.active_sessions[user_id]
         executor = FunctionExecutor(self.db, session)
         
@@ -144,6 +173,19 @@ class WebSocketSessionManager:
                     "error": "empty_audio",
                     "message": "No audio payload received."
                 }
+            # Check the encoded length first so an oversized frame is refused
+            # without materialising the decoded bytes.
+            if len(b64) > MAX_AUDIO_BYTES * 4 // 3 + 8:
+                return {
+                    "type": "error",
+                    "error": "audio_too_large",
+                    "message": (
+                        f"Audio clip too large "
+                        f"(limit {MAX_AUDIO_BYTES // (1024 * 1024)} MB). "
+                        f"Please record a shorter message."
+                    ),
+                }
+
             try:
                 audio_bytes = base64.b64decode(b64, validate=True)
             except (ValueError, TypeError):
@@ -151,6 +193,17 @@ class WebSocketSessionManager:
                     "type": "error",
                     "error": "bad_audio_encoding",
                     "message": "Audio payload was not valid base64."
+                }
+
+            if len(audio_bytes) > MAX_AUDIO_BYTES:
+                return {
+                    "type": "error",
+                    "error": "audio_too_large",
+                    "message": (
+                        f"Audio clip too large "
+                        f"(limit {MAX_AUDIO_BYTES // (1024 * 1024)} MB). "
+                        f"Please record a shorter message."
+                    ),
                 }
 
             try:

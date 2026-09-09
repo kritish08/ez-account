@@ -2,14 +2,52 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#000000" />
-    <title>EZ Accounts by Kyrex</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
+        <!-- viewport-fit=cover lets the page paint under the notch and home
+             indicator; index.css then pads content back with env(safe-area-*).
+             Without it those insets are always zero. -->
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+        <!-- Brand indigo, so the Android status bar and the PWA title bar
+             match the app instead of rendering black. -->
+        <meta name="theme-color" content="#4338ca" />
+        <title>EZ Accounts by Kyrex</title>
+
+        <!-- Installability. public/ previously held nothing but this file:
+             no manifest, no icons, so the app could not be added to a home
+             screen at all. -->
+        <link rel="manifest" href="/manifest.json" />
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="EZ Accounts" />
+        <meta
+            name="apple-mobile-web-app-status-bar-style"
+            content="black-translucent"
+        />
+        <meta name="mobile-web-app-capable" content="yes" />
+
+        <!--
+          Fonts are requested here rather than through an @import at the top
+          of index.css. An @import inside the bundled stylesheet cannot be
+          discovered until main.css has downloaded and parsed, making a
+          four-hop chain: html -> main.css -> fonts.googleapis.com ->
+          fonts.gstatic.com. Declared here with a preconnect, it is two.
+
+          Inter 300 was dropped: `font-light` appears nowhere in the app.
+        -->
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            rel="stylesheet"
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
+        />
+    </head>
+    <body>
+        <noscript>You need to enable JavaScript to run this app.</noscript>
+        <div id="root"></div>
         <script>
             !(function (t, e) {
                 var o, n, p, r;
@@ -72,13 +110,39 @@
                     }),
                     (e.__SV = 1));
             })(document, window.posthog || []);
-            posthog.init("phc_xAvL2Iq4tFmANRE7kzbKwaSqp1HJjN7x48s3vr0CMjs", {
-                api_host: "https://us.i.posthog.com",
-                person_profiles: "identified_only", // or 'always' to create profiles for anonymous users as well,
-                session_recording: {
-                    recordCrossOriginIframes: true,
-                },
-            });
+
+            // Session replay pulls in rrweb (~55KB gz) and then continuously
+            // serialises DOM mutations and uploads them. Most of this app's
+            // users are on mid-range Android phones paying for mobile data by
+            // the megabyte, so replay is off for narrow viewports, for anyone
+            // who has asked the browser to save data, and on 2G/3G. Ordinary
+            // event capture is unaffected.
+            (function () {
+                var saveData = false,
+                    slowLink = false;
+                try {
+                    var c = navigator.connection;
+                    if (c) {
+                        saveData = !!c.saveData;
+                        slowLink = /(^|-)(2g|3g)$/.test(c.effectiveType || "");
+                    }
+                } catch (e) {}
+
+                var narrow = window.matchMedia("(max-width: 900px)").matches;
+                var record = !narrow && !saveData && !slowLink;
+
+                posthog.init(
+                    "phc_xAvL2Iq4tFmANRE7kzbKwaSqp1HJjN7x48s3vr0CMjs",
+                    {
+                        api_host: "https://us.i.posthog.com",
+                        person_profiles: "identified_only",
+                        disable_session_recording: !record,
+                        session_recording: {
+                            recordCrossOriginIframes: true,
+                        },
+                    },
+                );
+            })();
         </script>
     </body>
 </html>
