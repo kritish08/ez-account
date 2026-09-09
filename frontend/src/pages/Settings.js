@@ -10,6 +10,10 @@ import {
   updateModulesSettings,
   resetSystem,
   getSystemSettings,
+  getOpenAISettings,
+  saveOpenAISettings,
+  testOpenAIKey,
+  deleteOpenAIKey,
   updateSystemSettings,
   registerPasskeyBegin,
   registerPasskeyComplete,
@@ -68,6 +72,7 @@ import {
   Pencil,
   Info,
   Landmark,
+  Sparkles,
 } from "lucide-react";
 import { Switch } from "../components/ui/switch";
 
@@ -89,6 +94,15 @@ const Settings = () => {
     bucket_name: "",
     region: "ap-south-1",
   });
+  // AI credential. `aiKey` holds only what the user is typing right now —
+  // the saved key never comes back from the server, so an empty box with a
+  // configured status is the normal resting state.
+  const [ai, setAi] = useState({ configured: false, source: "none", key_hint: "" });
+  const [aiKey, setAiKey] = useState("");
+  const [aiModel, setAiModel] = useState("");
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
   const [systemSettings, setSystemSettings] = useState({
     company_name: "",
     company_email: "",
@@ -260,14 +274,20 @@ const Settings = () => {
 
   const fetchSettings = async () => {
     try {
-      const [settingsRes, backupsRes, sysRes] = await Promise.all([
+      const [settingsRes, backupsRes, sysRes, aiRes] = await Promise.all([
         getS3Settings(),
         listBackups().catch(() => ({ data: { backups: [] } })),
-        getSystemSettings().catch(() => ({ data: {} }))
+        getSystemSettings().catch(() => ({ data: {} })),
+        getOpenAISettings().catch(() => ({ data: null })),
       ]);
 
       if (sysRes.data) {
         setSystemSettings(prev => ({ ...prev, ...sysRes.data }));
+      }
+
+      if (aiRes.data) {
+        setAi(aiRes.data);
+        setAiModel(aiRes.data.model || "");
       }
 
       if (settingsRes.data && settingsRes.data.configured) {
@@ -285,6 +305,72 @@ const Settings = () => {
       console.error("Failed to load settings:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // The mask means "keep the key you already have" — sending it lets the
+  // user change the model without re-pasting a key they no longer have.
+  const AI_KEY_MASK = "********";
+  const aiKeyToSend = () => (aiKey.trim() ? aiKey.trim() : ai.configured ? AI_KEY_MASK : "");
+
+  const handleTestAIKey = async () => {
+    const key = aiKeyToSend();
+    if (!key) {
+      toast.error("Paste your OpenAI API key first");
+      return;
+    }
+    setAiTesting(true);
+    setAiResult(null);
+    try {
+      const res = await testOpenAIKey({ api_key: key, model: aiModel || undefined });
+      setAiResult(res.data);
+      if (res.data.success) toast.success("Key works");
+      else toast.error(res.data.message || "That key did not work");
+    } catch (err) {
+      const message = err.response?.data?.detail || "Could not reach OpenAI";
+      setAiResult({ success: false, message });
+      toast.error(message);
+    } finally {
+      setAiTesting(false);
+    }
+  };
+
+  const handleSaveAIKey = async () => {
+    const key = aiKeyToSend();
+    if (!key) {
+      toast.error("Paste your OpenAI API key first");
+      return;
+    }
+    setAiSaving(true);
+    try {
+      await saveOpenAISettings({ api_key: key, model: aiModel || undefined });
+      setAiKey("");           // never keep the plaintext key in component state
+      setAiResult(null);
+      await fetchSettings();
+      toast.success("OpenAI key saved");
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Could not save the key");
+    } finally {
+      setAiSaving(false);
+    }
+  };
+
+  const handleRemoveAIKey = async () => {
+    setAiSaving(true);
+    try {
+      const res = await deleteOpenAIKey();
+      setAiKey("");
+      setAiResult(null);
+      await fetchSettings();
+      toast.success(
+        res.data?.source === "env"
+          ? "Key removed — falling back to the server's OPENAI_API_KEY"
+          : "Key removed. AI features are now off."
+      );
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Could not remove the key");
+    } finally {
+      setAiSaving(false);
     }
   };
 
@@ -675,6 +761,119 @@ const Settings = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* AI credential — bring your own OpenAI key */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-brand-600" />
+            AI features
+          </CardTitle>
+          <CardDescription>
+            Bill scanning and the voice assistant run on your own OpenAI account.
+            Usage is billed to that account.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div
+            className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+              ai.configured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"
+            }`}
+            data-testid="ai-status"
+          >
+            {ai.configured ? (
+              <>
+                <CheckCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>
+                  {ai.source === "settings" ? (
+                    <>Key saved here, ending <span className="font-mono">{ai.key_hint}</span>.</>
+                  ) : (
+                    <>Using the server's <span className="font-mono">OPENAI_API_KEY</span>, ending{" "}
+                      <span className="font-mono">{ai.key_hint}</span>. Saving a key below overrides it.</>
+                  )}
+                  {ai.model ? <> Model <span className="font-mono">{ai.model}</span>.</> : null}
+                </span>
+              </>
+            ) : (
+              <>
+                <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>
+                  No key configured — bill scanning and the voice assistant are off.
+                  The rest of the app is unaffected.
+                </span>
+              </>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="openai_api_key">OpenAI API key</Label>
+              <Input
+                id="openai_api_key"
+                type="password"
+                autoComplete="off"
+                inputMode="text"
+                value={aiKey}
+                onChange={(e) => setAiKey(e.target.value)}
+                placeholder={ai.configured ? "Leave blank to keep the saved key" : "sk-..."}
+                data-testid="openai-key-input"
+              />
+              <p className="text-xs text-slate-500">
+                Create one at platform.openai.com → API keys. It is encrypted before
+                it is stored and never shown again.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="openai_model">Model</Label>
+              <Input
+                id="openai_model"
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+                placeholder="gpt-5.6"
+                data-testid="openai-model-input"
+              />
+              <p className="text-xs text-slate-500">
+                Leave blank for the default. Test the key to see what your account can use.
+              </p>
+            </div>
+          </div>
+
+          {aiResult && (
+            <div
+              className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+                aiResult.success ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"
+              }`}
+              data-testid="ai-test-result"
+            >
+              {aiResult.success ? (
+                <CheckCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              ) : (
+                <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              )}
+              <span>
+                {aiResult.message}
+                {aiResult.requested_model_available === false && (
+                  <> That model is not available to this account.</>
+                )}
+              </span>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3">
+            <Button variant="outline" onClick={handleTestAIKey} disabled={aiTesting} data-testid="test-openai-btn">
+              {aiTesting ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Testing...</> : <><RefreshCw className="mr-2 h-4 w-4" />Test key</>}
+            </Button>
+            <Button onClick={handleSaveAIKey} disabled={aiSaving} className="bg-brand-600 hover:bg-brand-700" data-testid="save-openai-btn">
+              {aiSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : "Save key"}
+            </Button>
+            {ai.saved_in_settings && (
+              <Button variant="outline" onClick={handleRemoveAIKey} disabled={aiSaving} data-testid="remove-openai-btn">
+                Remove key
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* S3 Configuration */}
       <Card>

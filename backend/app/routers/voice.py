@@ -21,6 +21,7 @@ from jose import JWTError, jwt
 
 from app.config import ALGORITHM, SECRET_KEY
 from app.deps import security
+from app.services import ai_credentials
 from app.voice_state import get_manager
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,18 @@ async def voice_assistant_websocket(websocket: WebSocket, token: Optional[str] =
     if ws_session_manager is None:
         await websocket.send_json({"type": "error", "message": "Voice subsystem not ready"})
         await websocket.close(code=1011, reason="Voice subsystem not ready")
+        return
+
+    # The manager builds without a credential — the key is pasted into
+    # Settings, possibly long after boot. Say so here rather than letting
+    # the first spoken sentence fail somewhere inside the tool loop.
+    if not await ai_credentials.is_configured():
+        await websocket.send_json({
+            "type": "error",
+            "message": "The voice assistant needs an OpenAI API key. "
+                       "Add one in Settings → AI.",
+        })
+        await websocket.close(code=1011, reason="No OpenAI key configured")
         return
 
     try:
