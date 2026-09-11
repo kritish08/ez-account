@@ -94,17 +94,22 @@ Publishing one ₹21,000 GST invoice writes five rows, and they have to balance:
 flowchart TD
     INV["Invoice published<br/>10 bags × ₹2,000 + 5% GST"]
 
-    INV --> D1["<b>DR</b> customer:Sharma<br/>₹21,000"]
-    INV --> C1["<b>CR</b> sales<br/>₹20,000"]
-    INV --> C2["<b>CR</b> gst_output<br/>₹1,000"]
-    INV --> D2["<b>DR</b> cogs<br/>₹15,000"]
-    INV --> C3["<b>CR</b> inventory_asset<br/>₹15,000"]
+    INV --> D1["DR customer:Sharma<br/>₹21,000"]
+    INV --> C1["CR sales<br/>₹20,000"]
+    INV --> C2["CR gst_output<br/>₹1,000"]
+    INV --> D2["DR cogs<br/>₹15,000"]
+    INV --> C3["CR inventory_asset<br/>₹15,000"]
 
     D1 --> BAL{"debits = credits<br/>₹36,000 = ₹36,000"}
     C1 --> BAL
     C2 --> BAL
     D2 --> BAL
     C3 --> BAL
+
+    classDef debit fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef credit fill:#fef3c7,stroke:#b45309,color:#78350f
+    class D1,D2 debit
+    class C1,C2,C3 credit
 ```
 
 Tax is a liability, never revenue — money held on the government's behalf. Booking the gross to `sales` would overstate turnover by the tax on every invoice and leave the balance sheet with no record that it is owed onward.
