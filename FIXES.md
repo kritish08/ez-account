@@ -1204,7 +1204,7 @@ Open `http://localhost:8080`, log in with `test@best.com` / `password_123`, go t
    docker exec ez-backend python test_fido.py
    ```
 
-3. **`core-breakage-report.md`** — 676-line architectural audit doc (someone earlier ran a fragility review on the codebase). Most of its recommendations have already been addressed by the audit's 80+ fixes — kept in-tree as historical context and to acknowledge prior work.
+3. **`docs/fragility-audit-2026-05.md`** — 676-line architectural audit doc (someone earlier ran a fragility review on the codebase). Most of its recommendations have already been addressed by the audit's 80+ fixes — kept as historical context and to acknowledge prior work. Moved out of the repository root when the generator scaffolding was cleared.
 
 ### Skipped (with reasons)
 
