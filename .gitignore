@@ -96,5 +96,9 @@ SESSION_STATE.md
 # User-uploaded bill scans. These are per-deployment runtime data (the
 # Dockerfile removes the directory and compose mounts a volume over it),
 # and they contain real invoices, so they must never be committed.
+# Any uploads directory at any depth. `backend/uploads/` alone missed
+# `backend/backend/uploads/`, which kept one real customer bill scan
+# tracked for four months after the others were removed.
+**/uploads/
 backend/uploads/
 uploads/
